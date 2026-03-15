@@ -1,6 +1,6 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
-import { getOrCreateUser } from "@/lib/user";
+import { getOrCreateUserWithFlag } from "@/lib/user";
 
 /**
  * GET /api/user
@@ -14,9 +14,20 @@ export async function GET() {
   }
 
   try {
-    const user = await getOrCreateUser(userId);
-    // Debug: verify which row is returned and what plan is sent (match clerkUserId in Prisma Studio).
-    console.log("[GET /api/user] clerkUserId:", user.clerkUserId, "plan:", user.plan, "typeof plan:", typeof user.plan);
+    const clerkUser = await currentUser();
+    const email = clerkUser?.emailAddresses?.[0]?.emailAddress ?? null;
+
+    const { user, wasCreated } = await getOrCreateUserWithFlag(userId, email);
+
+    console.log("[GET /api/user]", {
+      clerkUserId: user.clerkUserId,
+      email: user.email,
+      foundOrCreated: wasCreated ? "created" : "found",
+      userId: user.id,
+      plan: user.plan,
+      credits: user.credits,
+    });
+
     return NextResponse.json({
       id: user.id,
       clerkUserId: user.clerkUserId,

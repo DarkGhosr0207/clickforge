@@ -827,10 +827,21 @@ export default function Home() {
               </Link>
               {isAuthenticated && (
                 <>
-                  <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                    {plan === "pro" ? "Pro plan" : "Free plan"}
-                  </span>
-                  <span className="text-sm font-medium text-gray-600">Credits left: {credits}</span>
+                  {!hasLoadedCredits ? (
+                    <>
+                      <span className="text-xs font-medium uppercase tracking-wide text-gray-400">
+                        Loading…
+                      </span>
+                      <span className="text-sm font-medium text-gray-400">Credits: …</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                        {plan === "pro" ? "Pro plan" : "Free plan"}
+                      </span>
+                      <span className="text-sm font-medium text-gray-600">Credits left: {credits}</span>
+                    </>
+                  )}
                   <UserButton
                     appearance={{
                       elements: { avatarBox: "h-8 w-8" },
