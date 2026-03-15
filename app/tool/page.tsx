@@ -1,7 +1,8 @@
 "use client";
 
+import { useAuth, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import localforage from "localforage";
 
 // Configure IndexedDB/localForage for project storage once at module load.
@@ -11,6 +12,7 @@ if (typeof window !== "undefined") {
     storeName: "projects",
   });
 }
+import { downloadImage } from "@/lib/downloadImage";
 import type {
   ThumbnailConcept as BaseThumbnailConcept,
   GeneratePackResponse,
@@ -43,6 +45,17 @@ type Project = {
   packs: SavedPack[];
 };
 
+// Temporary storage key for guest-generated pack (carried over after sign-up/sign-in).
+const PENDING_GUEST_PACK_KEY = "ctrPendingGuestPack";
+
+type PendingGuestPack = {
+  videoTitle: string;
+  niche: string;
+  audience: string;
+  generatedAt: string;
+  data: GeneratePackResponse;
+};
+
 export default function Home() {
   const [videoTitle, setVideoTitle] = useState("");
   const [niche, setNiche] = useState("");
@@ -57,6 +70,7 @@ export default function Home() {
   const [activePackGeneratedAt, setActivePackGeneratedAt] = useState<string | null>(null);
   const [comparisonResult, setComparisonResult] = useState<PackComparisonResult | null>(null);
   const [credits, setCredits] = useState(10);
+  const [plan, setPlan] = useState<"free" | "pro">("free");
   const [imageCreditError, setImageCreditError] = useState<string | null>(null);
   const [hasLoadedProjects, setHasLoadedProjects] = useState(false);
   const [hasLoadedCredits, setHasLoadedCredits] = useState(false);
@@ -68,25 +82,119 @@ export default function Home() {
   const generatorRef = useRef<HTMLDivElement | null>(null);
   const projectsRef = useRef<HTMLDivElement | null>(null);
 
-  // Load credits from localforage on first render.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    (async () => {
-      try {
-        const stored = await localforage.getItem<number>("ctrCredits");
-        if (typeof stored === "number") {
-          setCredits(stored);
-        }
-      } catch (err) {
-        console.error("Failed to load credits from localforage:", err);
+  // Clerk auth: guest (signed out) = teaser; signed in = full experience (all concepts, analytics, images, persistence).
+  const { isSignedIn } = useAuth();
+  const isAuthenticated = !!isSignedIn;
+  const isGuest = !isAuthenticated;
+  const visibleConcepts = isAuthenticated ? concepts : concepts.slice(0, 2);
+
+  // Layout: three states — library, guest results, or project workspace.
+  const isProjectOpen = !!activeProjectId;
+  const isGuestResultsOpen = !isAuthenticated && concepts.length > 0;
+  const isLibraryView = !isProjectOpen && !isGuestResultsOpen;
+
+  // Reusable loader for authenticated user (plan + credits). Refreshes when tab regains focus or becomes visible.
+  const loadCurrentUser = useCallback(async () => {
+    try {
+      const res = await fetch("/api/user", { cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as { credits: number; plan?: string };
+        // Debug: confirm what plan was returned and that state is updated.
+        console.log("[loadCurrentUser] plan from API:", data.plan, "setting:", data.plan === "pro" ? "pro" : "free");
+        setCredits(data.credits);
+        setPlan(data.plan === "pro" ? "pro" : "free");
       }
-      setHasLoadedCredits(true);
-    })();
+    } catch (err) {
+      console.error("Failed to load user:", err);
+    }
   }, []);
 
-  // Persist credits to localforage whenever they change (after initial load).
+  // Credits: initial load — signed-in from API, guests from local storage.
   useEffect(() => {
-    if (typeof window === "undefined" || !hasLoadedCredits) return;
+    if (typeof window === "undefined") return;
+    if (isAuthenticated) {
+      loadCurrentUser().finally(() => setHasLoadedCredits(true));
+    } else {
+      (async () => {
+        try {
+          const stored = await localforage.getItem<number>("ctrCredits");
+          if (typeof stored === "number") setCredits(stored);
+        } catch (err) {
+          console.error("Failed to load credits from localforage:", err);
+        }
+        setHasLoadedCredits(true);
+      })();
+    }
+  }, [isAuthenticated, loadCurrentUser]);
+
+  // Refresh plan/credits when window regains focus or tab becomes visible (authenticated only).
+  useEffect(() => {
+    if (typeof window === "undefined" || !isAuthenticated) return;
+    const onRefresh = () => void loadCurrentUser();
+    window.addEventListener("focus", onRefresh);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") onRefresh();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", onRefresh);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isAuthenticated, loadCurrentUser]);
+
+  // On auth: import pending guest pack into a real project in Postgres and open workspace.
+  useEffect(() => {
+    if (typeof window === "undefined" || !isAuthenticated) return;
+    (async () => {
+      try {
+        const pending = await localforage.getItem<PendingGuestPack>(PENDING_GUEST_PACK_KEY);
+        if (!pending) return;
+        const { videoTitle: title, niche: n, audience: a, generatedAt, data } = pending;
+        const res = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            videoTitle: title,
+            niche: n,
+            audience: a,
+            pack: {
+              generatedAt,
+              recommendation: data.recommendation ?? null,
+              thumbnails: data.thumbnails,
+            },
+          }),
+        });
+        if (!res.ok) {
+          console.error("Failed to save guest pack to backend");
+          return;
+        }
+        const { projects: nextProjects } = (await res.json()) as { projects: Project[] };
+        setProjects(nextProjects);
+        const projectWithPack = nextProjects.find((p) =>
+          p.packs.some((pack) => pack.generatedAt === generatedAt)
+        );
+        if (projectWithPack) {
+          setActiveProjectId(projectWithPack.projectId);
+          setActivePackGeneratedAt(generatedAt);
+        }
+        setVideoTitle(title);
+        setNiche(n);
+        setAudience(a);
+        setConcepts(data.thumbnails);
+        setRecommendation(data.recommendation ?? null);
+        setComparisonResult(null);
+        setImprovingConceptIds([]);
+        setError(null);
+        await localforage.removeItem(PENDING_GUEST_PACK_KEY);
+      } catch (err) {
+        console.error("Failed to import pending guest pack:", err);
+      }
+    })();
+  }, [isAuthenticated]);
+
+  // Persist credits to localforage only for guests (signed-in users use backend).
+  useEffect(() => {
+    if (typeof window === "undefined" || !hasLoadedCredits || isAuthenticated) return;
     (async () => {
       try {
         await localforage.setItem("ctrCredits", credits);
@@ -94,59 +202,27 @@ export default function Home() {
         console.error("Failed to persist credits to localforage:", err);
       }
     })();
-  }, [credits, hasLoadedCredits]);
+  }, [credits, hasLoadedCredits, isAuthenticated]);
 
-  // Load projects from IndexedDB via localforage on first render.
-  // Also perform a one-time migration from localStorage if needed.
+  // Load projects: authenticated users from backend; guests have no project library.
   useEffect(() => {
     if (typeof window === "undefined") return;
     (async () => {
-      try {
-        let stored = await localforage.getItem<Project[]>("ctrProjects");
-
-        // Optional migration: if IndexedDB is empty but localStorage has data,
-        // move it into localforage and then clear localStorage.
-        if (!stored) {
-          const raw = window.localStorage.getItem("ctrProjects");
-          if (raw) {
-            try {
-              const fromLocal = JSON.parse(raw) as Project[];
-              stored = fromLocal;
-              await localforage.setItem("ctrProjects", fromLocal);
-              window.localStorage.removeItem("ctrProjects");
-            } catch (err) {
-              console.error("Failed to migrate ctrProjects from localStorage:", err);
-            }
+      if (isAuthenticated) {
+        try {
+          const res = await fetch("/api/projects");
+          if (res.ok) {
+            const data = (await res.json()) as { projects: Project[] };
+            setProjects(data.projects);
           }
+        } catch (err) {
+          console.error("Failed to load projects from API:", err);
+          setProjects([]);
         }
-
-        if (stored) {
-          setProjects(stored);
-        }
-      } catch (err) {
-        console.error("Failed to load projects from localforage:", err);
-        setProjects([]);
       }
-      // Mark that the initial load attempt has completed (success or failure)
       setHasLoadedProjects(true);
     })();
-  }, []);
-
-  // Persist projects to IndexedDB whenever they change
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    // Avoid overwriting existing stored data with an empty array
-    // before the initial load has completed.
-    if (!hasLoadedProjects) return;
-    (async () => {
-      try {
-        await localforage.setItem("ctrProjects", projects);
-      } catch (err) {
-        // If storage fails, log but don't crash the app.
-        console.error("Failed to persist projects to localforage:", err);
-      }
-    })();
-  }, [projects, hasLoadedProjects]);
+  }, [isAuthenticated]);
 
   // Find the highest CTR score so we can highlight a "Top Pick".
   const maxScore =
@@ -159,43 +235,36 @@ export default function Home() {
         }, 0)
       : 0;
 
-  // This function will generate an image for a single concept (card)
+  // This function will generate an image for a single concept (card).
+  // Uses functional setConcepts updates so multiple in-flight requests don't overwrite each other.
   const handleGenerateImage = async (conceptId: number) => {
     if (credits <= 0) {
       setImageCreditError("No image credits left.");
       return;
     }
 
-    // Find the index of the concept we want to update
-    const index = concepts.findIndex((concept) => concept.id === conceptId);
-    if (index === -1) return;
+    const concept = concepts.find((c) => c.id === conceptId);
+    if (!concept) return;
 
     setImageCreditError(null);
-
-    // Clear any previous image error for this concept
-    const updatedConcepts = [...concepts];
-    updatedConcepts[index] = {
-      ...updatedConcepts[index],
-      imageError: null,
-      isImageLoading: true,
-    };
-    setConcepts(updatedConcepts);
-
-    const concept = updatedConcepts[index];
+    setConcepts((prev) =>
+      prev.map((c) =>
+        c.id === conceptId
+          ? { ...c, imageError: null, isImageLoading: true }
+          : c
+      )
+    );
 
     try {
-      // Send a POST request to the image generation API
       const response = await fetch("/api/generate-image", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          // High-level video context
           title: videoTitle,
           niche,
           audience,
-          // Concept-level details
           strategy: concept.strategy,
           visualHook: concept.visualHook,
           overlayText: concept.overlayText,
@@ -205,37 +274,51 @@ export default function Home() {
         }),
       });
 
-      if (!response.ok) {
-        // If the response is not OK, show a simple error on this card
-        const conceptsWithError = [...updatedConcepts];
-        conceptsWithError[index] = {
-          ...conceptsWithError[index],
-          imageError: "Failed to generate image. Please try again.",
-          isImageLoading: false,
-        };
-        setConcepts(conceptsWithError);
+      if (response.status === 402) {
+        setCredits(0);
+        setImageCreditError("You're out of credits.");
+        setConcepts((prev) =>
+          prev.map((c) =>
+            c.id === conceptId
+              ? { ...c, imageError: "You're out of credits.", isImageLoading: false }
+              : c
+          )
+        );
         return;
       }
 
-      // Read the JSON body from the response
-      const data: { imageUrl: string } = await response.json();
+      if (!response.ok) {
+        setConcepts((prev) =>
+          prev.map((c) =>
+            c.id === conceptId
+              ? {
+                  ...c,
+                  imageError: "Failed to generate image. Please try again.",
+                  isImageLoading: false,
+                }
+              : c
+          )
+        );
+        return;
+      }
 
-      // Update this specific concept with the new image URL (for UI only)
-      const conceptsWithImage = [...updatedConcepts];
-      conceptsWithImage[index] = {
-        ...conceptsWithImage[index],
-        imageUrl: data.imageUrl,
-        isImageLoading: false,
-      };
-      setConcepts(conceptsWithImage);
-      setCredits((c) => c - 1);
+      const data = (await response.json()) as { imageUrl: string; credits?: number };
 
-      // Also persist the image URL into the appropriate pack of the current project
-      // so that refreshing the page or switching packs keeps this image.
+      setConcepts((prev) =>
+        prev.map((c) =>
+          c.id === conceptId
+            ? { ...c, imageUrl: data.imageUrl, isImageLoading: false }
+            : c
+        )
+      );
+
+      if (typeof data.credits === "number") {
+        setCredits(data.credits);
+      }
+
       setProjects((prev) => {
         if (prev.length === 0) return prev;
 
-        // Try to find the active project first; if not available, match by title/niche/audience.
         const projectToUpdate =
           (activeProjectId && prev.find((p) => p.projectId === activeProjectId)) ||
           prev.find(
@@ -249,13 +332,11 @@ export default function Home() {
           return prev;
         }
 
-        const nextProjects = prev.map((project) => {
+        return prev.map((project) => {
           if (project.projectId !== projectToUpdate.projectId) return project;
           if (project.packs.length === 0) return project;
 
           const packs = [...project.packs];
-
-          // Prefer the currently active pack; if not found, fall back to the latest pack.
           let packIndex =
             activePackGeneratedAt != null
               ? packs.findIndex((p) => p.generatedAt === activePackGeneratedAt)
@@ -265,7 +346,6 @@ export default function Home() {
           }
 
           const packToUpdate = packs[packIndex];
-
           const updatedThumbnails = packToUpdate.data.thumbnails.map((t) =>
             t.id === conceptId ? { ...t, imageUrl: data.imageUrl } : t
           );
@@ -278,22 +358,34 @@ export default function Home() {
             },
           };
 
-          return {
-            ...project,
-            packs,
-          };
+          return { ...project, packs };
         });
-        return nextProjects;
       });
+
+      if (isAuthenticated && activeProjectId && activePackGeneratedAt != null) {
+        fetch("/api/projects/packs/concept-image", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: activeProjectId,
+            packGeneratedAt: activePackGeneratedAt,
+            conceptIndex: conceptId,
+            imageUrl: data.imageUrl,
+          }),
+        }).catch((err) => console.error("Failed to persist concept image:", err));
+      }
     } catch (err) {
-      // Handle network errors or unexpected problems
-      const conceptsWithError = [...updatedConcepts];
-      conceptsWithError[index] = {
-        ...conceptsWithError[index],
-        imageError: "Unable to reach the server. Please try again.",
-        isImageLoading: false,
-      };
-      setConcepts(conceptsWithError);
+      setConcepts((prev) =>
+        prev.map((c) =>
+          c.id === conceptId
+            ? {
+                ...c,
+                imageError: "Unable to reach the server. Please try again.",
+                isImageLoading: false,
+              }
+            : c
+        )
+      );
     }
   };
 
@@ -328,15 +420,52 @@ export default function Home() {
       }
 
       const data: { thumbnails: ThumbnailConcept[] } = await response.json();
-      setConcepts((prev) =>
-        prev.map((c) => {
-          const replacement = data.thumbnails.find((t) => t.id === c.id);
-          if (replacement) {
-            return { ...replacement, imageUrl: c.imageUrl, isImageLoading: c.isImageLoading, imageError: c.imageError };
+      const improvedConcepts = concepts.map((c) => {
+        const replacement = data.thumbnails.find((t) => t.id === c.id);
+        if (replacement) {
+          return { ...replacement, imageUrl: undefined, imageError: null, isImageLoading: false };
+        }
+        return c;
+      });
+      setConcepts(improvedConcepts);
+
+      if (isAuthenticated && activeProjectId && activePackGeneratedAt != null) {
+        try {
+          const patchRes = await fetch("/api/projects/packs/thumbnails", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              projectId: activeProjectId,
+              packGeneratedAt: activePackGeneratedAt,
+              thumbnails: improvedConcepts.map((c) => ({
+                id: c.id,
+                strategy: c.strategy,
+                overlayText: c.overlayText,
+                composition: c.composition,
+                emotion: c.emotion,
+                colors: c.colors,
+                visualHook: c.visualHook,
+                score: c.score,
+                scoreReason: c.scoreReason,
+                curiosityScore: c.curiosityScore,
+                emotionScore: c.emotionScore,
+                clarityScore: c.clarityScore,
+                competitionScore: c.competitionScore,
+                titleSuggestion: c.titleSuggestion,
+                titleReason: c.titleReason,
+                titleFitScore: c.titleFitScore,
+                imageUrl: c.imageUrl,
+              })),
+            }),
+          });
+          if (patchRes.ok) {
+            const { projects: nextProjects } = (await patchRes.json()) as { projects: Project[] };
+            setProjects(nextProjects);
           }
-          return c;
-        })
-      );
+        } catch (err) {
+          console.error("Failed to persist improved concepts:", err);
+        }
+      }
     } catch (err) {
       setError("Unable to reach the server. Please try again.");
     } finally {
@@ -344,7 +473,7 @@ export default function Home() {
     }
   };
 
-  // Helper to select a project and load its latest pack
+  // Helper to select a project and load its latest pack (by generatedAt descending).
   const handleSelectProject = (projectId: string) => {
     const project = projects.find((p) => p.projectId === projectId);
     if (!project) return;
@@ -357,12 +486,18 @@ export default function Home() {
     setImprovingConceptIds([]);
     setComparisonResult(null);
 
-    const latestPack = project.packs[project.packs.length - 1];
+    const sortedPacks = [...project.packs].sort(
+      (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
+    );
+    const latestPack = sortedPacks[0];
     if (latestPack) {
       setConcepts(latestPack.data.thumbnails);
       setRecommendation(latestPack.data.recommendation ?? null);
       setActivePackGeneratedAt(latestPack.generatedAt);
-      setComparisonResult(null);
+    } else {
+      setConcepts([]);
+      setRecommendation(null);
+      setActivePackGeneratedAt(null);
     }
   };
 
@@ -380,13 +515,123 @@ export default function Home() {
     setComparisonResult(null);
   };
 
+  const handleDeleteProject = async (projectId?: string, confirmMessage?: string) => {
+    const idToDelete = projectId ?? activeProjectId;
+    if (!idToDelete) return;
+    const message =
+      confirmMessage ?? "Delete this project and all saved packs?";
+    if (!window.confirm(message)) return;
+    if (isAuthenticated) {
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(idToDelete)}`, {
+          method: "DELETE",
+        });
+        if (res.ok) {
+          const { projects: nextProjects } = (await res.json()) as { projects: Project[] };
+          setProjects(nextProjects);
+        } else {
+          setProjects((prev) => prev.filter((p) => p.projectId !== idToDelete));
+        }
+      } catch (err) {
+        console.error("Failed to delete project:", err);
+        setProjects((prev) => prev.filter((p) => p.projectId !== idToDelete));
+      }
+    } else {
+      setProjects((prev) => prev.filter((p) => p.projectId !== idToDelete));
+    }
+    if (idToDelete === activeProjectId) {
+      setActiveProjectId(null);
+      setActivePackGeneratedAt(null);
+      setConcepts([]);
+      setRecommendation(null);
+      setComparisonResult(null);
+      setImprovingConceptIds([]);
+      setError(null);
+      generatorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  const handleDeletePack = async (projectId: string, packGeneratedAt: string) => {
+    if (!window.confirm("Delete this saved pack?")) return;
+    const project = projects.find((p) => p.projectId === projectId);
+    if (!project) return;
+
+    const wasActivePack = packGeneratedAt === activePackGeneratedAt;
+
+    const applyActiveState = (nextProjects: Project[]) => {
+      if (!wasActivePack) return;
+      const updatedProject = nextProjects.find((p) => p.projectId === projectId);
+      const remaining = updatedProject?.packs ?? [];
+      if (remaining.length > 0) {
+        const latest = remaining[remaining.length - 1];
+        setActivePackGeneratedAt(latest.generatedAt);
+        setConcepts(latest.data.thumbnails);
+        setRecommendation(latest.data.recommendation ?? null);
+        setComparisonResult(null);
+        setImprovingConceptIds([]);
+      } else {
+        setActiveProjectId(null);
+        setActivePackGeneratedAt(null);
+        setConcepts([]);
+        setRecommendation(null);
+        setComparisonResult(null);
+        setImprovingConceptIds([]);
+        setError(null);
+      }
+    };
+
+    if (isAuthenticated) {
+      try {
+        const url = `/api/projects/${encodeURIComponent(projectId)}/packs?generatedAt=${encodeURIComponent(packGeneratedAt)}`;
+        const res = await fetch(url, { method: "DELETE" });
+        if (res.ok) {
+          const { projects: nextProjects } = (await res.json()) as { projects: Project[] };
+          setProjects(nextProjects);
+          applyActiveState(nextProjects);
+        } else {
+          const remainingPacks = project.packs.filter((p) => p.generatedAt !== packGeneratedAt);
+          const nextProjects =
+            remainingPacks.length === 0
+              ? projects.filter((p) => p.projectId !== projectId)
+              : projects.map((p) =>
+                  p.projectId === projectId
+                    ? { ...p, lastUpdatedAt: new Date().toISOString(), packs: remainingPacks }
+                    : p
+                );
+          setProjects(nextProjects);
+          applyActiveState(nextProjects);
+        }
+      } catch (err) {
+        console.error("Failed to delete pack:", err);
+        const remainingPacks = project.packs.filter((p) => p.generatedAt !== packGeneratedAt);
+        const nextProjects =
+          remainingPacks.length === 0
+            ? projects.filter((p) => p.projectId !== projectId)
+            : projects.map((p) =>
+                p.projectId === projectId
+                  ? { ...p, lastUpdatedAt: new Date().toISOString(), packs: remainingPacks }
+                  : p
+              );
+        setProjects(nextProjects);
+        applyActiveState(nextProjects);
+      }
+    } else {
+      const remainingPacks = project.packs.filter((p) => p.generatedAt !== packGeneratedAt);
+      const nextProjects =
+        remainingPacks.length === 0
+          ? projects.filter((p) => p.projectId !== projectId)
+          : projects.map((p) =>
+              p.projectId === projectId
+                ? { ...p, lastUpdatedAt: new Date().toISOString(), packs: remainingPacks }
+                : p
+            );
+      setProjects(nextProjects);
+      applyActiveState(nextProjects);
+    }
+  };
+
   const handleDownloadImage = (url: string, id: number) => {
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `thumbnail-variant-${id}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadImage(url, `clickforge-thumbnail-${id}.png`);
   };
 
   const buildAllConceptsText = (): string => {
@@ -509,78 +754,57 @@ export default function Home() {
       setRecommendation(data.recommendation ?? null);
       setComparisonResult(null);
 
-      // Save this pack into the projects history
-      const now = new Date().toISOString();
-      setProjects((prev) => {
-        // Decide which project to attach this pack to:
-        // - If there is an active project AND the form still matches its core fields,
-        //   reuse that project.
-        // - Otherwise, try to find another project with matching title/niche/audience.
-        // - If none exists, create a new project.
-        let project: Project | undefined;
+      // Persist guest pack temporarily so it can be carried over after sign-up/sign-in.
+      if (!isAuthenticated) {
+        const now = new Date().toISOString();
+        const pending: PendingGuestPack = {
+          videoTitle,
+          niche,
+          audience,
+          generatedAt: now,
+          data,
+        };
+        try {
+          await localforage.setItem(PENDING_GUEST_PACK_KEY, pending);
+        } catch (err) {
+          console.error("Failed to save pending guest pack:", err);
+        }
+      }
 
-        if (activeProjectId) {
-          const activeProject = prev.find((p) => p.projectId === activeProjectId);
-          if (
-            activeProject &&
-            activeProject.videoTitle === videoTitle &&
-            activeProject.niche === niche &&
-            activeProject.audience === audience
-          ) {
-            project = activeProject;
+      // Save this pack to backend (authenticated users only) and refresh state from server.
+      if (isAuthenticated) {
+        const now = new Date().toISOString();
+        try {
+          const res = await fetch("/api/projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              videoTitle,
+              niche,
+              audience,
+              activeProjectId: activeProjectId || undefined,
+              pack: {
+                generatedAt: now,
+                recommendation: data.recommendation ?? null,
+                thumbnails: data.thumbnails,
+              },
+            }),
+          });
+          if (res.ok) {
+            const { projects: nextProjects } = (await res.json()) as { projects: Project[] };
+            setProjects(nextProjects);
+            const projectWithNewPack = nextProjects.find((p) =>
+              p.packs.some((pack) => pack.generatedAt === now)
+            );
+            if (projectWithNewPack) {
+              setActiveProjectId(projectWithNewPack.projectId);
+              setActivePackGeneratedAt(now);
+            }
           }
+        } catch (err) {
+          console.error("Failed to save pack to backend:", err);
         }
-
-        if (!project) {
-          project = prev.find(
-            (p) =>
-              p.videoTitle === videoTitle &&
-              p.niche === niche &&
-              p.audience === audience
-          );
-        }
-
-        if (!project) {
-          // Create a new project
-          const projectId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          const newProject: Project = {
-            projectId,
-            videoTitle,
-            niche,
-            audience,
-            createdAt: now,
-            lastUpdatedAt: now,
-            packs: [
-              {
-                generatedAt: now,
-                data,
-              },
-            ],
-          };
-          setActiveProjectId(projectId);
-          setActivePackGeneratedAt(now);
-          return [...prev, newProject];
-        }
-
-        // Append a new pack to the existing project
-        const updatedProjects = prev.map((p) => {
-          if (p.projectId !== project!.projectId) return p;
-          return {
-            ...p,
-            lastUpdatedAt: now,
-            packs: [
-              ...p.packs,
-              {
-                generatedAt: now,
-                data,
-              },
-            ],
-          };
-        });
-        setActiveProjectId(project.projectId);
-        setActivePackGeneratedAt(now);
-        return updatedProjects;
-      });
+      }
     } catch (err) {
       // This catches network errors or other unexpected problems
       setError("Unable to reach the server. Please check your connection and try again.");
@@ -601,83 +825,29 @@ export default function Home() {
               <Link href="/" className="text-sm text-gray-600 hover:text-gray-900 transition">
                 Home
               </Link>
-              <span className="text-sm font-medium text-gray-600">Credits left: {credits}</span>
+              {isAuthenticated && (
+                <>
+                  <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {plan === "pro" ? "Pro plan" : "Free plan"}
+                  </span>
+                  <span className="text-sm font-medium text-gray-600">Credits left: {credits}</span>
+                  <UserButton
+                    appearance={{
+                      elements: { avatarBox: "h-8 w-8" },
+                    }}
+                  />
+                </>
+              )}
             </div>
           </div>
           <p className="mt-3 max-w-2xl text-sm text-gray-600">
             Generate strategic YouTube thumbnail concepts designed to improve click-through rate.
           </p>
-          <div className="mt-5 flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setActiveProjectId(null);
-                setActivePackGeneratedAt(null);
-                setConcepts([]);
-                setRecommendation(null);
-                setComparisonResult(null);
-                setError(null);
-                generatorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-              className="rounded-2xl bg-black px-5 py-2 text-sm font-semibold text-white transition hover:opacity-90"
-            >
-              Start New Pack
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                projectsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-              className="rounded-2xl border border-gray-300 bg-white px-5 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50"
-            >
-              Continue Project
-            </button>
-          </div>
         </div>
 
-        {/* Home mode: projects + generator when no project is active */}
-        {activeProjectId === null && (
+        {/* Project Library view: generator + project library (no project open, no guest results) */}
+        {isLibraryView && (
           <>
-            {/* Projects history */}
-            <div ref={projectsRef} className="mb-8">
-              <h2 className="mb-2 text-lg font-semibold text-gray-900">Your Projects</h2>
-              {projects.length === 0 ? (
-                <p className="text-sm text-gray-500">
-                  No projects yet. Generate a CTR pack to create your first project.
-                </p>
-              ) : (
-                <div className="flex flex-wrap gap-3">
-                  {projects.map((project) => {
-                    const packCount = project.packs.length;
-                    const lastUpdated = new Date(project.lastUpdatedAt).toLocaleString();
-                    const isActive = project.projectId === activeProjectId;
-                    return (
-                      <button
-                        key={project.projectId}
-                        type="button"
-                        onClick={() => handleSelectProject(project.projectId)}
-                        className={`min-w-[220px] rounded-2xl border px-4 py-3 text-left text-sm transition ${
-                          isActive
-                            ? "border-black bg-black text-white"
-                            : "border-gray-200 bg-white text-gray-800 hover:bg-gray-50"
-                        }`}
-                      >
-                        <p className="truncate font-semibold">
-                          {project.videoTitle || "Untitled project"}
-                        </p>
-                        <p className={`mt-1 text-xs ${isActive ? "text-gray-200" : "text-gray-500"}`}>
-                          {project.niche} • {project.audience}
-                        </p>
-                        <p className={`mt-1 text-xs ${isActive ? "text-gray-200" : "text-gray-500"}`}>
-                          {packCount} pack{packCount === 1 ? "" : "s"} • Last updated {lastUpdated}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
             {/* Generator form */}
             <div
               ref={generatorRef}
@@ -791,14 +961,97 @@ export default function Home() {
                 </p>
               )}
             </div>
+
+            {/* Project Library: all projects, sorted by last updated */}
+            {isAuthenticated && (
+              <div ref={projectsRef} className="mb-10">
+                <h2 className="mb-4 text-lg font-semibold text-gray-900">Project Library</h2>
+                {projects.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    No projects yet. Generate a CTR pack above to create your first project.
+                  </p>
+                ) : (
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {[...projects]
+                      .sort(
+                        (a, b) =>
+                          new Date(b.lastUpdatedAt).getTime() - new Date(a.lastUpdatedAt).getTime()
+                      )
+                      .map((project) => {
+                        const packCount = project.packs.length;
+                        const created = new Date(project.createdAt).toLocaleDateString();
+                        const lastUpdated = new Date(project.lastUpdatedAt).toLocaleString();
+                        return (
+                          <div
+                            key={project.projectId}
+                            className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
+                          >
+                            <p className="truncate font-semibold text-gray-900">
+                              {project.videoTitle || "Untitled project"}
+                            </p>
+                            <p className="mt-1 text-xs text-gray-500">
+                              {project.niche} • {project.audience}
+                            </p>
+                            <p className="mt-1 text-xs text-gray-500">
+                              {packCount} pack{packCount === 1 ? "" : "s"}
+                            </p>
+                            <p className="mt-0.5 text-xs text-gray-400">
+                              Created {created} · Updated {lastUpdated}
+                            </p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleSelectProject(project.projectId)}
+                                className="rounded-xl bg-black px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                              >
+                                Open
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleDeleteProject(
+                                    project.projectId,
+                                    "Delete this project and all its packs?"
+                                  )
+                                }
+                                className="rounded-xl border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
 
-        {/* Workspace mode content when concepts exist */}
-        {concepts.length > 0 && (
+        {/* Results view: project workspace (authenticated) or guest results (guest with concepts) */}
+        {(isProjectOpen || isGuestResultsOpen) && (
           <div>
-            {/* Active project header and workspace controls */}
-            {activeProjectId &&
+            {/* Guest results: back to generator to return to library */}
+            {isGuestResultsOpen && !isProjectOpen && (
+              <div className="mb-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConcepts([]);
+                    setRecommendation(null);
+                    setError(null);
+                    generatorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }}
+                  className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Back to generator
+                </button>
+              </div>
+            )}
+
+            {/* Active project header and workspace controls (authenticated only) */}
+            {isProjectOpen && isAuthenticated && (
               (() => {
                 const project = projects.find((p) => p.projectId === activeProjectId);
                 if (!project) return null;
@@ -810,14 +1063,24 @@ export default function Home() {
                         {project.videoTitle || "Untitled project"}
                       </span>
                     </p>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-3">
                       <button
                         type="button"
-                        onClick={handleGenerate}
-                        className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              "Generate a new pack for this project? This will create a new saved pack."
+                            )
+                          )
+                            return;
+                          handleGenerate();
+                        }}
+                        disabled={loading}
+                        className="rounded-xl bg-black px-4 py-2 text-xs font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Generate New Pack
+                        {loading ? "Generating new pack..." : "Generate New Pack"}
                       </button>
+                      <span className="h-4 w-px bg-gray-200" aria-hidden />
                       <button
                         type="button"
                         onClick={() => setIsEditingQuery((prev) => !prev)}
@@ -838,15 +1101,24 @@ export default function Home() {
                         }}
                         className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
                       >
-                        New Project
+                        Back to projects
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleDeleteProject(undefined, "Delete this project and all saved packs?")
+                        }
+                        className="rounded-xl border border-red-200 bg-white px-4 py-2 text-xs font-medium text-red-700 hover:bg-red-50"
+                      >
+                        Delete Project
                       </button>
                     </div>
                   </div>
                 );
-              })()}
+              })() )}
 
-            {/* Inline query editor for the active project */}
-            {activeProjectId &&
+            {/* Inline query editor for the active project (authenticated only) */}
+            {isAuthenticated &&
               isEditingQuery &&
               (() => {
                 const project = projects.find((p) => p.projectId === activeProjectId);
@@ -914,7 +1186,7 @@ export default function Home() {
             <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
               <h2 className="text-2xl font-semibold">Thumbnail Concepts</h2>
               <div className="flex items-center gap-3">
-                {concepts.length > 0 && (
+                {isAuthenticated && concepts.length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -931,8 +1203,26 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Saved packs for the active project */}
-            {activeProjectId && (
+            {/* Out-of-credits empty state (authenticated only) */}
+            {isAuthenticated && credits <= 0 && concepts.length > 0 && (
+              <div className="mb-6 rounded-2xl border border-gray-200 bg-gray-50 p-5">
+                <h3 className="text-lg font-semibold text-gray-900">You&apos;re out of image credits</h3>
+                <p className="mt-2 text-sm text-gray-600">
+                  You&apos;ve used all your free credits for image generation.
+                  More credits and upgrade options are coming soon.
+                </p>
+                <button
+                  type="button"
+                  disabled
+                  className="mt-4 rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-500"
+                >
+                  Notify me when more credits are available
+                </button>
+              </div>
+            )}
+
+            {/* Saved packs for the active project (authenticated only) */}
+            {isAuthenticated && activeProjectId && (
               <div className="mb-4">
                 <p className="mb-1 text-sm font-medium text-gray-900">Saved Packs</p>
                 {(() => {
@@ -952,18 +1242,30 @@ export default function Home() {
                         const label = isLatest ? `Pack ${index + 1} (Latest)` : `Pack ${index + 1}`;
                         const when = new Date(pack.generatedAt).toLocaleString();
                         return (
-                          <button
-                            key={pack.generatedAt}
-                            type="button"
-                            onClick={() => handleSelectPack(pack.generatedAt)}
-                            className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                              isActivePack
-                                ? "border-black bg-black text-white"
-                                : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
-                            }`}
-                          >
-                            {label} • {when}
-                          </button>
+                          <span key={pack.generatedAt} className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleSelectPack(pack.generatedAt)}
+                              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                                isActivePack
+                                  ? "border-black bg-black text-white"
+                                  : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                              }`}
+                            >
+                              {label} • {when}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeletePack(project.projectId, pack.generatedAt);
+                              }}
+                              className="rounded-full border border-gray-200 bg-white p-1 text-xs text-gray-500 hover:bg-red-50 hover:text-red-700"
+                              title="Delete this saved pack"
+                            >
+                              ×
+                            </button>
+                          </span>
                         );
                       })}
                     </div>
@@ -972,7 +1274,18 @@ export default function Home() {
               </div>
             )}
 
-            {recommendation && (
+            {!isAuthenticated && concepts.length > 0 && (
+              <div className="mb-6 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-gray-200 border-dashed bg-gray-50 p-4">
+                  <p className="text-sm font-medium text-gray-500">CTR analysis available with a free account</p>
+                </div>
+                <div className="rounded-2xl border border-gray-200 border-dashed bg-gray-50 p-4">
+                  <p className="text-sm font-medium text-gray-500">Top pick available with a free account</p>
+                </div>
+              </div>
+            )}
+
+            {isAuthenticated && recommendation && (
               <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
                 <h3 className="mb-3 text-lg font-semibold text-gray-900">AI Recommendation</h3>
                 <p className="mb-2 text-sm text-gray-600">
@@ -999,7 +1312,7 @@ export default function Home() {
               </div>
             )}
 
-            {activeProjectId && comparisonResult && (
+            {isAuthenticated && activeProjectId && comparisonResult && (
               <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
                 <h3 className="mb-3 text-lg font-semibold text-gray-900">Pack Comparison</h3>
                 <p className="mb-2 text-sm text-gray-700">
@@ -1017,6 +1330,7 @@ export default function Home() {
               </div>
             )}
 
+            {isAuthenticated && (
             <div className="mb-4 flex flex-wrap items-center gap-3">
               <button
                 type="button"
@@ -1104,14 +1418,15 @@ export default function Home() {
                   </button>
                 )}
             </div>
+            )}
 
             <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-              {concepts.map((concept) => (
+              {visibleConcepts.map((concept) => (
                 <div
                   key={concept.id}
                   className="relative rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
                 >
-                  {improvingConceptIds.includes(concept.id) && (
+                  {isAuthenticated && improvingConceptIds.includes(concept.id) && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-white/80">
                       <span className="text-sm font-medium text-gray-600">Regenerating...</span>
                     </div>
@@ -1126,12 +1441,12 @@ export default function Home() {
                       <span className="rounded-full bg-gray-100 px-3 py-1 font-medium text-gray-600">
                         Variant {concept.id}
                       </span>
-                      {typeof concept.score === "number" && (
+                      {isAuthenticated && typeof concept.score === "number" && (
                         <span className="rounded-full bg-green-50 px-3 py-1 text-[11px] font-medium text-green-700">
                           CTR Score: {concept.score} / 10
                         </span>
                       )}
-                      {typeof concept.score === "number" &&
+                      {isAuthenticated && typeof concept.score === "number" &&
                         concept.score === maxScore &&
                         maxScore > 0 && (
                           <span className="mt-1 rounded-full bg-yellow-100 px-3 py-1 text-[11px] font-semibold text-yellow-900">
@@ -1141,6 +1456,7 @@ export default function Home() {
                     </div>
                   </div>
 
+                  {isAuthenticated && (
                   <p className="mb-2 text-xs font-medium text-gray-600">
                     {concept.isImageLoading
                       ? "Rendering visual..."
@@ -1148,20 +1464,21 @@ export default function Home() {
                         ? "Generated image ✓"
                         : "No image yet"}
                   </p>
-                  {concept.isImageLoading && (
+                  )}
+                  {isAuthenticated && concept.isImageLoading && (
                     <p className="mb-2 text-[11px] text-gray-500">
                       This can take up to 45 seconds
                     </p>
                   )}
 
-                  {concept.isImageLoading && (
+                  {isAuthenticated && concept.isImageLoading && (
                     <div
                       className="mb-4 h-40 w-full animate-pulse rounded-xl border border-gray-200 bg-gray-200"
                       aria-hidden
                     />
                   )}
 
-                  {concept.imageUrl && !concept.isImageLoading && (
+                  {isAuthenticated && concept.imageUrl && !concept.isImageLoading && (
                     <div className="mb-4 overflow-hidden rounded-xl border border-gray-200">
                       <img
                         src={concept.imageUrl}
@@ -1171,7 +1488,7 @@ export default function Home() {
                     </div>
                   )}
 
-                  {concept.imageUrl && !concept.isImageLoading && (
+                  {isAuthenticated && concept.imageUrl && !concept.isImageLoading && (
                     <div className="mb-4">
                       <p className="mb-2 text-xs font-medium text-gray-600">Visibility Test</p>
                       <div className="flex flex-wrap gap-3">
@@ -1245,7 +1562,7 @@ export default function Home() {
                             <p className="mt-0.5 text-gray-700">{concept.titleReason}</p>
                           </>
                         )}
-                        {typeof concept.titleFitScore === "number" && (
+                        {isAuthenticated && typeof concept.titleFitScore === "number" && (
                           <p className="mt-2 text-xs text-gray-600">
                             Title Fit: {concept.titleFitScore}/10
                           </p>
@@ -1260,7 +1577,7 @@ export default function Home() {
                       </div>
                     )}
 
-                    {(typeof concept.curiosityScore === "number" ||
+                    {isAuthenticated && (typeof concept.curiosityScore === "number" ||
                       typeof concept.emotionScore === "number" ||
                       typeof concept.clarityScore === "number" ||
                       typeof concept.competitionScore === "number") && (
@@ -1284,15 +1601,9 @@ export default function Home() {
                     )}
                   </div>
 
-                  {concept.imageError && (
+                  {isAuthenticated && concept.imageError && (
                     <p className="mt-3 text-xs text-red-600">
                       {concept.imageError}
-                    </p>
-                  )}
-
-                  {credits <= 0 && (
-                    <p className="mt-2 text-xs text-red-600">
-                      No image credits left
                     </p>
                   )}
 
@@ -1308,6 +1619,7 @@ export default function Home() {
                     >
                       {copiedIdeaId === concept.id ? "Copied ✓" : "Copy idea"}
                     </button>
+                    {isAuthenticated && credits > 0 && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1319,10 +1631,21 @@ export default function Home() {
                     >
                       {copiedPromptId === concept.id ? "Copied prompt ✓" : "Copy image prompt"}
                     </button>
+                    )}
+                    {isAuthenticated && credits <= 0 && (
+                      <div className="rounded-xl border border-gray-200 bg-gray-100 px-4 py-3">
+                        <p className="text-sm font-medium text-gray-600">Out of credits</p>
+                        <p className="mt-0.5 text-xs text-gray-500">
+                          You&apos;ve used all your free image credits.
+                        </p>
+                        <p className="mt-1 text-xs text-gray-400">More credits coming soon.</p>
+                      </div>
+                    )}
+                    {isAuthenticated && credits > 0 && (
                     <button
                       className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                       onClick={() => handleGenerateImage(concept.id)}
-                      disabled={credits <= 0 || concept.isImageLoading}
+                      disabled={concept.isImageLoading}
                     >
                       {concept.isImageLoading
                         ? "Generating..."
@@ -1330,7 +1653,16 @@ export default function Home() {
                           ? "Regenerate image"
                           : "Generate image"}
                     </button>
-                    {concept.imageUrl && (
+                    )}
+                    {!isAuthenticated && (
+                      <div className="flex flex-col gap-1">
+                        <span className="rounded-xl border border-gray-200 bg-gray-100 px-4 py-2 text-center text-sm font-medium text-gray-500">
+                          Generate image
+                        </span>
+                        <p className="text-xs text-gray-500">Sign up to unlock</p>
+                      </div>
+                    )}
+                    {isAuthenticated && concept.imageUrl && (
                       <button
                         type="button"
                         onClick={() => handleDownloadImage(concept.imageUrl!, concept.id)}
@@ -1342,7 +1674,50 @@ export default function Home() {
                   </div>
                 </div>
               ))}
+              {!isAuthenticated && concepts.length > 0 &&
+                [1, 2, 3].map((i) => (
+                  <div
+                    key={`locked-${i}`}
+                    className="relative rounded-2xl border border-gray-200 border-dashed bg-gray-50 p-5 opacity-90"
+                  >
+                    <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-2 text-center">
+                      <p className="text-sm font-semibold text-gray-500">Locked concept</p>
+                      <p className="text-xs text-gray-500">Sign up to unlock</p>
+                    </div>
+                  </div>
+                ))}
             </div>
+
+            {/* Guest upsell: unlock full pack */}
+            {!isAuthenticated && concepts.length > 0 && (
+              <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+                <h3 className="text-lg font-semibold text-gray-900">Unlock the full CTR pack</h3>
+                <p className="mt-3 text-sm text-gray-600">
+                  Create a free account to unlock:
+                </p>
+                <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-gray-600">
+                  <li>all 5 concepts</li>
+                  <li>CTR analysis</li>
+                  <li>top pick</li>
+                  <li>image generation</li>
+                  <li>saved projects</li>
+                </ul>
+                <div className="mt-5 flex flex-wrap gap-3">
+                  <Link
+                    href="/sign-up"
+                    className="rounded-2xl bg-black px-5 py-2.5 text-sm font-semibold text-white transition hover:opacity-90"
+                  >
+                    Create free account
+                  </Link>
+                  <Link
+                    href="/sign-in"
+                    className="rounded-2xl border border-gray-300 bg-white px-5 py-2.5 text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
+                  >
+                    Sign in
+                  </Link>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

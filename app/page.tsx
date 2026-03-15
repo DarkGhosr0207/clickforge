@@ -1,6 +1,12 @@
+"use client";
+
+import { useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 
 export default function Home() {
+  const { isSignedIn } = useAuth();
+  const isAuthenticated = !!isSignedIn;
+
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900">
       {/* Hero */}
@@ -19,12 +25,29 @@ export default function Home() {
             Generate thumbnail concepts, test CTR strength, and create visuals before you open Canva.
           </p>
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
-            <Link
-              href="/tool"
-              className="rounded-2xl bg-black px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-            >
-              Try ClickForge
-            </Link>
+            {isAuthenticated ? (
+              <Link
+                href="/tool"
+                className="rounded-2xl bg-black px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+              >
+                Open ClickForge
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/sign-in"
+                  className="rounded-2xl border border-gray-300 bg-white px-6 py-3 text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  href="/tool"
+                  className="rounded-2xl bg-black px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                >
+                  Try ClickForge
+                </Link>
+              </>
+            )}
             <a
               href="#features"
               className="rounded-2xl border border-gray-300 bg-white px-6 py-3 text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
@@ -123,7 +146,7 @@ export default function Home() {
               href="/tool"
               className="inline-block rounded-2xl bg-black px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90"
             >
-              Open ClickForge
+              {isAuthenticated ? "Open ClickForge" : "Try ClickForge"}
             </Link>
           </div>
         </div>
