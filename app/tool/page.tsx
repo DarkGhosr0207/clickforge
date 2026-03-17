@@ -245,6 +245,12 @@ export default function Home() {
     }));
   };
 
+  const getBestVariantIdFromConcepts = (thumbnails: Array<{ id: number; score?: number; isTopPick?: boolean }>) => {
+    const topPick = thumbnails.find((t) => t.isTopPick);
+    if (topPick) return topPick.id;
+    return pickTopConceptIndex(thumbnails);
+  };
+
   // This function will generate an image for a single concept (card).
   // Uses functional setConcepts updates so multiple in-flight requests don't overwrite each other.
   const handleGenerateImage = async (conceptId: number) => {
@@ -437,7 +443,12 @@ export default function Home() {
         }
         return c;
       });
-      setConcepts(attachTopPick(improvedConcepts));
+      const improvedWithTopPick = attachTopPick(improvedConcepts);
+      setConcepts(improvedWithTopPick);
+
+      // Invalidate any existing recommendation after changing concepts.
+      // The previous explanation/analysis/stress test may no longer match the new best variant.
+      setRecommendation(null);
 
       if (isAuthenticated && activeProjectId && activePackGeneratedAt != null) {
         try {
@@ -1306,29 +1317,37 @@ export default function Home() {
               </div>
             )}
 
-            {isAuthenticated && recommendation && (
+            {isAuthenticated && concepts.length > 0 && (
               <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
                 <h3 className="mb-3 text-lg font-semibold text-gray-900">AI Recommendation</h3>
-                <p className="mb-2 text-sm text-gray-600">
-                  <span className="font-medium text-gray-900">Best Variant:</span>{" "}
-                  {recommendation.bestVariantId}
-                </p>
-                <div className="mb-3 text-sm text-gray-700">
-                  <p className="font-medium text-gray-900">Explanation</p>
-                  <p className="mt-1">{recommendation.explanation}</p>
-                </div>
-                <div className="mb-3 text-sm text-gray-700">
-                  <p className="font-medium text-gray-900">CTR Analysis</p>
-                  <p className="mt-1">{recommendation.ctrReasoning}</p>
-                </div>
-                {recommendation.stressTest && (
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                    <p className="font-medium text-gray-900">Stress Test</p>
-                    <p className="mt-1.5 text-xs font-medium text-gray-600">What could fail:</p>
-                    <p className="mt-0.5">{recommendation.stressTest.risk}</p>
-                    <p className="mt-2 text-xs font-medium text-gray-600">How to improve:</p>
-                    <p className="mt-0.5">{recommendation.stressTest.improvement}</p>
-                  </div>
+                {!recommendation ? (
+                  <p className="text-sm text-gray-600">
+                    Recommendation needs to be regenerated after improving variants.
+                  </p>
+                ) : (
+                  <>
+                    <p className="mb-2 text-sm text-gray-600">
+                      <span className="font-medium text-gray-900">Best Variant:</span>{" "}
+                      {recommendation.bestVariantId}
+                    </p>
+                    <div className="mb-3 text-sm text-gray-700">
+                      <p className="font-medium text-gray-900">Explanation</p>
+                      <p className="mt-1">{recommendation.explanation}</p>
+                    </div>
+                    <div className="mb-3 text-sm text-gray-700">
+                      <p className="font-medium text-gray-900">CTR Analysis</p>
+                      <p className="mt-1">{recommendation.ctrReasoning}</p>
+                    </div>
+                    {recommendation.stressTest && (
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                        <p className="font-medium text-gray-900">Stress Test</p>
+                        <p className="mt-1.5 text-xs font-medium text-gray-600">What could fail:</p>
+                        <p className="mt-0.5">{recommendation.stressTest.risk}</p>
+                        <p className="mt-2 text-xs font-medium text-gray-600">How to improve:</p>
+                        <p className="mt-0.5">{recommendation.stressTest.improvement}</p>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}
