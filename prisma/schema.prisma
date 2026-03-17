@@ -70,7 +70,8 @@ model Concept {
   emotionScore      Int?
   clarityScore      Int?
   competitionScore  Int?
-  score             Int?
+  score             Float?
+  isTopPick         Boolean  @default(false)
   titleSuggestion   String?
   titleReason       String?
   titleFitScore     Int?

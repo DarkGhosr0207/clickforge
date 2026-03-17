@@ -13,6 +13,8 @@ export type ThumbnailConcept = {
   imageUrl?: string;
   // Optional CTR score (1–10) estimating how strong this concept is
   score?: number;
+  // Persisted: exactly one concept per pack should be true
+  isTopPick?: boolean;
   // Short explanation of why this concept may perform well
   scoreReason?: string;
   // Short phrase describing the single strongest visual element

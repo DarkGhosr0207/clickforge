@@ -224,16 +224,26 @@ export default function Home() {
     })();
   }, [isAuthenticated]);
 
-  // Find the highest CTR score so we can highlight a "Top Pick".
-  const maxScore =
-    concepts.length > 0
-      ? concepts.reduce((highest, concept) => {
-          if (typeof concept.score === "number") {
-            return concept.score > highest ? concept.score : highest;
-          }
-          return highest;
-        }, 0)
-      : 0;
+  const formatCtrScore = (score: number) => score.toFixed(1);
+
+  const pickTopConceptIndex = (thumbnails: Array<{ id: number; score?: number }>): number | null => {
+    let best: { id: number; score: number } | null = null;
+    for (const t of thumbnails) {
+      if (typeof t.score !== "number") continue;
+      if (!best || t.score > best.score || (t.score === best.score && t.id < best.id)) {
+        best = { id: t.id, score: t.score };
+      }
+    }
+    return best?.id ?? null;
+  };
+
+  const attachTopPick = <T extends { id: number; score?: number }>(thumbnails: T[]): T[] => {
+    const topPickId = pickTopConceptIndex(thumbnails);
+    return thumbnails.map((t) => ({
+      ...t,
+      isTopPick: topPickId != null && t.id === topPickId,
+    }));
+  };
 
   // This function will generate an image for a single concept (card).
   // Uses functional setConcepts updates so multiple in-flight requests don't overwrite each other.
@@ -427,7 +437,7 @@ export default function Home() {
         }
         return c;
       });
-      setConcepts(improvedConcepts);
+      setConcepts(attachTopPick(improvedConcepts));
 
       if (isAuthenticated && activeProjectId && activePackGeneratedAt != null) {
         try {
@@ -650,7 +660,7 @@ export default function Home() {
         "Title:",
         c.titleSuggestion ?? "—",
         "",
-        `CTR Score: ${typeof c.score === "number" ? c.score : "—"}/10`,
+        `CTR Score: ${typeof c.score === "number" ? formatCtrScore(c.score) : "—"}/10`,
         "",
       ]),
     ];
@@ -665,7 +675,7 @@ export default function Home() {
       `Emotion: ${concept.emotion ?? ""}`,
       `Colors: ${concept.colors ?? ""}`,
       `Suggested Title: ${concept.titleSuggestion ?? "—"}`,
-      `CTR Score: ${typeof concept.score === "number" ? `${concept.score}/10` : "—/10"}`,
+      `CTR Score: ${typeof concept.score === "number" ? `${formatCtrScore(concept.score)}/10` : "—/10"}`,
     ];
     return lines.join("\n");
   };
@@ -750,7 +760,7 @@ export default function Home() {
       const data: GeneratePackResponse = await response.json();
 
       // Update our concepts state with the thumbnails from the API
-      setConcepts(data.thumbnails);
+      setConcepts(attachTopPick(data.thumbnails));
       setRecommendation(data.recommendation ?? null);
       setComparisonResult(null);
 
@@ -1454,12 +1464,10 @@ export default function Home() {
                       </span>
                       {isAuthenticated && typeof concept.score === "number" && (
                         <span className="rounded-full bg-green-50 px-3 py-1 text-[11px] font-medium text-green-700">
-                          CTR Score: {concept.score} / 10
+                          CTR Score: {formatCtrScore(concept.score)} / 10
                         </span>
                       )}
-                      {isAuthenticated && typeof concept.score === "number" &&
-                        concept.score === maxScore &&
-                        maxScore > 0 && (
+                      {isAuthenticated && concept.isTopPick && (
                           <span className="mt-1 rounded-full bg-yellow-100 px-3 py-1 text-[11px] font-semibold text-yellow-900">
                             🏆 Top Pick
                           </span>

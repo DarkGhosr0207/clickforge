@@ -20,6 +20,7 @@ export type ProjectForFrontend = {
         colors: string;
         visualHook?: string;
         score?: number;
+          isTopPick?: boolean;
         scoreReason?: string;
         curiosityScore?: number;
         emotionScore?: number;
@@ -44,6 +45,7 @@ function conceptFromDbToThumbnail(c: {
   colors: string;
   visualHook: string | null;
   score: number | null;
+  isTopPick: boolean;
   scoreReason: string | null;
   curiosityScore: number | null;
   emotionScore: number | null;
@@ -63,6 +65,7 @@ function conceptFromDbToThumbnail(c: {
     colors: c.colors,
     ...(c.visualHook != null && { visualHook: c.visualHook }),
     ...(c.score != null && { score: c.score }),
+    isTopPick: c.isTopPick,
     ...(c.scoreReason != null && { scoreReason: c.scoreReason }),
     ...(c.curiosityScore != null && { curiosityScore: c.curiosityScore }),
     ...(c.emotionScore != null && { emotionScore: c.emotionScore }),
@@ -73,6 +76,17 @@ function conceptFromDbToThumbnail(c: {
     ...(c.titleFitScore != null && { titleFitScore: c.titleFitScore }),
     ...(c.imageUrl != null && { imageUrl: c.imageUrl }),
   };
+}
+
+function pickTopConceptIndex(thumbnails: ThumbnailConcept[]): number | null {
+  let best: { id: number; score: number } | null = null;
+  for (const t of thumbnails) {
+    if (typeof t.score !== "number") continue;
+    if (!best || t.score > best.score || (t.score === best.score && t.id < best.id)) {
+      best = { id: t.id, score: t.score };
+    }
+  }
+  return best?.id ?? null;
 }
 
 export async function getProjectsForUser(clerkUserId: string): Promise<ProjectForFrontend[]> {
@@ -153,6 +167,7 @@ export async function savePackForUser(
     });
   }
   const now = new Date();
+  const topPickId = pickTopConceptIndex(pack.thumbnails);
   if (!project) {
     project = await prisma.project.create({
       data: {
@@ -185,6 +200,7 @@ export async function savePackForUser(
           clarityScore: t.clarityScore ?? null,
           competitionScore: t.competitionScore ?? null,
           score: t.score ?? null,
+          isTopPick: topPickId != null && t.id === topPickId,
           titleSuggestion: t.titleSuggestion ?? null,
           titleReason: t.titleReason ?? null,
           titleFitScore: t.titleFitScore ?? null,
@@ -286,6 +302,7 @@ export async function updatePackThumbnailsForUser(
   });
   if (!pack) return getProjectsForUser(clerkUserId);
   await prisma.concept.deleteMany({ where: { packId: pack.id } });
+  const topPickId = pickTopConceptIndex(thumbnails);
   await prisma.concept.createMany({
     data: thumbnails.map((t) => ({
       packId: pack.id,
@@ -302,6 +319,7 @@ export async function updatePackThumbnailsForUser(
       clarityScore: t.clarityScore ?? null,
       competitionScore: t.competitionScore ?? null,
       score: t.score ?? null,
+      isTopPick: topPickId != null && t.id === topPickId,
       titleSuggestion: t.titleSuggestion ?? null,
       titleReason: t.titleReason ?? null,
       titleFitScore: t.titleFitScore ?? null,
