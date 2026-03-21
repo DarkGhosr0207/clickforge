@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/db";
 import type { Recommendation, ThumbnailConcept } from "@/lib/ai/types";
+import { generatePackRecommendation } from "@/lib/ai/generatePackRecommendation";
+import { pickTopVariantId } from "@/lib/ai/pickTopVariantId";
 
 export type ProjectForFrontend = {
   projectId: string;
@@ -35,6 +37,36 @@ export type ProjectForFrontend = {
     };
   }[];
 };
+
+function recommendationFromPack(pack: {
+  recommendation: unknown;
+  recommendedVariantId: number | null;
+  recommendationExplanation: string | null;
+  recommendationCtrReasoning: string | null;
+  recommendationStressRisk: string | null;
+  recommendationStressImprovement: string | null;
+}): Recommendation | null {
+  if (
+    typeof pack.recommendedVariantId === "number" &&
+    pack.recommendationExplanation &&
+    pack.recommendationCtrReasoning
+  ) {
+    const stress =
+      pack.recommendationStressRisk && pack.recommendationStressImprovement
+        ? {
+            risk: pack.recommendationStressRisk,
+            improvement: pack.recommendationStressImprovement,
+          }
+        : undefined;
+    return {
+      bestVariantId: pack.recommendedVariantId,
+      explanation: pack.recommendationExplanation,
+      ctrReasoning: pack.recommendationCtrReasoning,
+      ...(stress ? { stressTest: stress } : {}),
+    };
+  }
+  return (pack.recommendation as Recommendation | null) ?? null;
+}
 
 function conceptFromDbToThumbnail(c: {
   conceptIndex: number;
@@ -79,14 +111,7 @@ function conceptFromDbToThumbnail(c: {
 }
 
 function pickTopConceptIndex(thumbnails: ThumbnailConcept[]): number | null {
-  let best: { id: number; score: number } | null = null;
-  for (const t of thumbnails) {
-    if (typeof t.score !== "number") continue;
-    if (!best || t.score > best.score || (t.score === best.score && t.id < best.id)) {
-      best = { id: t.id, score: t.score };
-    }
-  }
-  return best?.id ?? null;
+  return pickTopVariantId(thumbnails);
 }
 
 export async function getProjectsForUser(clerkUserId: string): Promise<ProjectForFrontend[]> {
@@ -122,7 +147,7 @@ export async function getProjectsForUser(clerkUserId: string): Promise<ProjectFo
       generatedAt: pack.generatedAt,
       data: {
         thumbnails: pack.concepts.map((c) => conceptFromDbToThumbnail(c)),
-        recommendation: (pack.recommendation as Recommendation | null) ?? null,
+        recommendation: recommendationFromPack(pack),
       },
     })),
   }));
@@ -185,6 +210,11 @@ export async function savePackForUser(
       projectId: project.id,
       generatedAt: pack.generatedAt,
       recommendation: (pack.recommendation ?? null) as object,
+      recommendedVariantId: pack.recommendation?.bestVariantId ?? null,
+      recommendationExplanation: pack.recommendation?.explanation ?? null,
+      recommendationCtrReasoning: pack.recommendation?.ctrReasoning ?? null,
+      recommendationStressRisk: pack.recommendation?.stressTest?.risk ?? null,
+      recommendationStressImprovement: pack.recommendation?.stressTest?.improvement ?? null,
       concepts: {
         create: pack.thumbnails.map((t) => ({
           conceptIndex: t.id,
@@ -298,7 +328,7 @@ export async function updatePackThumbnailsForUser(
   if (!user) return getProjectsForUser(clerkUserId);
   const pack = await prisma.pack.findFirst({
     where: { projectId, generatedAt: packGeneratedAt, project: { userId: user.id } },
-    include: { concepts: true },
+    include: { concepts: true, project: true },
   });
   if (!pack) return getProjectsForUser(clerkUserId);
   await prisma.concept.deleteMany({ where: { packId: pack.id } });
@@ -326,5 +356,29 @@ export async function updatePackThumbnailsForUser(
       imageUrl: t.imageUrl ?? null,
     })),
   });
+
+  // Regenerate and persist recommendation so it stays in sync after improvements/reload.
+  try {
+    const nextRec = await generatePackRecommendation({
+      title: pack.project.videoTitle,
+      niche: pack.project.niche,
+      audience: pack.project.audience,
+      thumbnails,
+    });
+    await prisma.pack.update({
+      where: { id: pack.id },
+      data: {
+        recommendation: (nextRec ?? null) as object,
+        recommendedVariantId: nextRec?.bestVariantId ?? null,
+        recommendationExplanation: nextRec?.explanation ?? null,
+        recommendationCtrReasoning: nextRec?.ctrReasoning ?? null,
+        recommendationStressRisk: nextRec?.stressTest?.risk ?? null,
+        recommendationStressImprovement: nextRec?.stressTest?.improvement ?? null,
+      },
+    });
+  } catch (err) {
+    console.warn("[updatePackThumbnailsForUser] Failed to regenerate recommendation:", err);
+  }
+
   return getProjectsForUser(clerkUserId);
 }

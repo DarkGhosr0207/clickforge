@@ -46,6 +46,11 @@ model Pack {
   projectId        String
   generatedAt      String
   recommendation   Json?
+  recommendedVariantId              Int?
+  recommendationExplanation         String?
+  recommendationCtrReasoning        String?
+  recommendationStressRisk          String?
+  recommendationStressImprovement   String?
   comparisonResult Json?
   createdAt        DateTime  @default(now())
   project          Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)

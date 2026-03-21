@@ -1,6 +1,7 @@
 import { getOpenAIClient } from "./client";
 import type { GeneratePackResponse, Recommendation, StressTest } from "./types";
 import { CTR_PATTERNS } from "./ctrPatterns";
+import { pickTopVariantId } from "./pickTopVariantId";
 
 // Weights for computing final CTR score from breakdown.
 const SCORE_WEIGHTS = {
@@ -211,7 +212,10 @@ Rules:
     score: computeScoreFromBreakdown(t),
   }));
 
-  // Ask the model to recommend the best variant based on the pack.
+  // Deterministic winner (source of truth): highest score, tie-break by lowest id.
+  const bestVariantId = pickTopVariantId(parsed.thumbnails);
+
+  // Ask the model to EXPLAIN the already-selected winner (do not let it pick).
   const summary = parsed.thumbnails.map((t) => ({
     id: t.id,
     strategy: t.strategy,
@@ -225,6 +229,8 @@ Rules:
     titleSuggestion: t.titleSuggestion,
     titleFitScore: t.titleFitScore,
   }));
+
+  const best = typeof bestVariantId === "number" ? parsed.thumbnails.find((t) => t.id === bestVariantId) : undefined;
 
   const recCompletion = await openai.chat.completions.create({
     model: "gpt-4.1-mini",
@@ -245,17 +251,28 @@ Here are the 5 thumbnail concepts:
 
 ${JSON.stringify(summary, null, 2)}
 
-Pick the single best variant for YouTube long-form CTR, then explain your choice in plain language a creator would understand.
+The winning variant has already been chosen by the product using a deterministic rule (highest CTR score, tie-break by lowest id).
+Your job is to explain WHY this chosen winner is strong for CTR in plain language a creator would understand.
+
+Chosen winner: Variant ${typeof bestVariantId === "number" ? bestVariantId : "—"}
+
+Winner details:
+- Strategy: ${best?.strategy ?? "—"}
+- Visual hook: ${best?.visualHook ?? "—"}
+- Overlay text idea: ${best?.overlayText ?? "—"}
+- Composition: ${best?.composition ?? "—"}
+- Emotion: ${best?.emotion ?? "—"}
+- Colors: ${best?.colors ?? "—"}
+- Title suggestion: ${best?.titleSuggestion ?? "—"}
 
 Return JSON:
 {
-  "bestVariantId": number,
   "explanation": "2-3 sentences in a natural, human tone. Say why this concept grabs attention and why viewers would want to click—like you're advising a creator, not writing a report.",
   "ctrReasoning": "Short, practical note: what grabs attention, why it makes people curious or emotional, how the thumbnail and title work together, and why it stands out in this niche. Use simple, clear language. No jargon or numbers."
 }
 
 Rules:
-- bestVariantId must be one of the concept ids (1, 2, 3, 4, or 5).
+- Do NOT choose a different variant. Do NOT output any variant id.
 - explanation: 2-3 sentences, natural and creator-friendly. Do NOT reference numeric scores, curiosityScore, emotionScore, clarityScore, competitionScore, or numbers like (8/10). Focus on what grabs attention, why viewers feel curious or emotional, how thumbnail and title work together, why it stands out in the niche.
 - ctrReasoning: simple, clear, practical—something a creator gets instantly. Do NOT mention scores or internal metrics. Do NOT say things like 'balances high curiosity and emotion' or 'scores well on clarity'. Sound like a human strategist, not an AI.
 - Do NOT wrap the JSON in backticks.`,
@@ -265,12 +282,15 @@ Rules:
 
   const recRaw = recCompletion.choices[0]?.message?.content ?? "";
   try {
-    const recParsed = JSON.parse(recRaw) as Recommendation;
-    if (typeof recParsed.bestVariantId === "number" && recParsed.explanation && recParsed.ctrReasoning) {
-      parsed.recommendation = recParsed;
+    const recParsed = JSON.parse(recRaw) as Pick<Recommendation, "explanation" | "ctrReasoning">;
+    if (typeof bestVariantId === "number" && recParsed.explanation && recParsed.ctrReasoning) {
+      parsed.recommendation = {
+        bestVariantId,
+        explanation: recParsed.explanation,
+        ctrReasoning: recParsed.ctrReasoning,
+      };
 
-      // Stress test: analyze the best variant for potential weaknesses and improvements.
-      const best = parsed.thumbnails.find((t) => t.id === recParsed.bestVariantId);
+      // Stress test: analyze the locked winner for potential weaknesses and improvements.
       if (best) {
         const stressCompletion = await openai.chat.completions.create({
           model: "gpt-4.1-mini",
@@ -286,7 +306,8 @@ Rules:
               role: "user",
               content: `Video: "${title}". Niche: "${niche}". Audience: "${audience}".
 
-This is the recommended thumbnail concept:
+This is the recommended thumbnail concept (locked winner):
+- Variant: ${bestVariantId}
 - Strategy: ${best.strategy}
 - Visual hook: ${best.visualHook ?? "—"}
 - Overlay text idea: ${best.overlayText}

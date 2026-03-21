@@ -13,9 +13,29 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Social preview: public/og-image.png (1200×630). Regenerate: npm run og:image
 export const metadata: Metadata = {
-  title: "ClickForge – YouTube Thumbnail Strategy Tool",
-  description: "Generate thumbnail concepts, test CTR strength, and create visuals before you open Canva.",
+  metadataBase: new URL("https://ctrlab.ai"),
+  title: "CTRLab — AI Tool to Increase YouTube CTR",
+  description:
+    "Generate high-performing thumbnails and titles with AI. Optimize your YouTube CTR with better concepts, scoring, and recommendations.",
+  openGraph: {
+    title: "CTRLab — AI Tool to Increase YouTube CTR",
+    description:
+      "Generate high-performing thumbnails and titles with AI. Optimize your YouTube CTR with better concepts, scoring, and recommendations.",
+    url: "https://ctrlab.ai",
+    siteName: "CTRLab",
+    type: "website",
+    locale: "en_US",
+    images: [{ url: "/og-image.png" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "CTRLab — AI Tool to Increase YouTube CTR",
+    description:
+      "Generate high-performing thumbnails and titles with AI. Optimize your YouTube CTR with better concepts, scoring, and recommendations.",
+    images: ["/og-image.png"],
+  },
 };
 
 export default function RootLayout({

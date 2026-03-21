@@ -8,7 +8,7 @@ import localforage from "localforage";
 // Configure IndexedDB/localForage for project storage once at module load.
 if (typeof window !== "undefined") {
   localforage.config({
-    name: "ctr-pack-generator",
+    name: "ctrlab",
     storeName: "projects",
   });
 }
@@ -47,6 +47,36 @@ type Project = {
 
 // Temporary storage key for guest-generated pack (carried over after sign-up/sign-in).
 const PENDING_GUEST_PACK_KEY = "ctrPendingGuestPack";
+
+/** IndexedDB name used before the CTRLab rebrand (localForage default instance). */
+const LEGACY_LOCALFORAGE_DB = "ctr-pack-generator";
+
+let localForageMigrationPromise: Promise<void> | null = null;
+
+/**
+ * One-time migration: copy guest keys from the legacy DB into the current `ctrlab` store if missing.
+ */
+function ensureLocalForageMigrated(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (!localForageMigrationPromise) {
+    localForageMigrationPromise = (async () => {
+      const legacy = localforage.createInstance({
+        name: LEGACY_LOCALFORAGE_DB,
+        storeName: "projects",
+      });
+      const keysToMigrate = ["ctrCredits", PENDING_GUEST_PACK_KEY] as const;
+      for (const key of keysToMigrate) {
+        const current = await localforage.getItem(key);
+        if (current != null) continue;
+        const fromLegacy = await legacy.getItem(key);
+        if (fromLegacy != null) {
+          await localforage.setItem(key, fromLegacy);
+        }
+      }
+    })();
+  }
+  return localForageMigrationPromise;
+}
 
 type PendingGuestPack = {
   videoTitle: string;
@@ -117,6 +147,7 @@ export default function Home() {
     } else {
       (async () => {
         try {
+          await ensureLocalForageMigrated();
           const stored = await localforage.getItem<number>("ctrCredits");
           if (typeof stored === "number") setCredits(stored);
         } catch (err) {
@@ -147,6 +178,7 @@ export default function Home() {
     if (typeof window === "undefined" || !isAuthenticated) return;
     (async () => {
       try {
+        await ensureLocalForageMigrated();
         const pending = await localforage.getItem<PendingGuestPack>(PENDING_GUEST_PACK_KEY);
         if (!pending) return;
         const { videoTitle: title, niche: n, audience: a, generatedAt, data } = pending;
@@ -446,8 +478,7 @@ export default function Home() {
       const improvedWithTopPick = attachTopPick(improvedConcepts);
       setConcepts(improvedWithTopPick);
 
-      // Invalidate any existing recommendation after changing concepts.
-      // The previous explanation/analysis/stress test may no longer match the new best variant.
+      // Clear stale recommendation until the persisted pack update returns a fresh one.
       setRecommendation(null);
 
       if (isAuthenticated && activeProjectId && activePackGeneratedAt != null) {
@@ -482,6 +513,10 @@ export default function Home() {
           if (patchRes.ok) {
             const { projects: nextProjects } = (await patchRes.json()) as { projects: Project[] };
             setProjects(nextProjects);
+            // Pull the freshly regenerated, persisted recommendation for the active pack.
+            const updatedProject = nextProjects.find((p) => p.projectId === activeProjectId);
+            const updatedPack = updatedProject?.packs.find((p) => p.generatedAt === activePackGeneratedAt);
+            setRecommendation(updatedPack?.data.recommendation ?? null);
           }
         } catch (err) {
           console.error("Failed to persist improved concepts:", err);
@@ -652,7 +687,7 @@ export default function Home() {
   };
 
   const handleDownloadImage = (url: string, id: number) => {
-    downloadImage(url, `clickforge-thumbnail-${id}.png`);
+    downloadImage(url, `ctrlab-thumbnail-${id}.png`);
   };
 
   const buildAllConceptsText = (): string => {
@@ -841,7 +876,7 @@ export default function Home() {
         {/* Entry header */}
         <div className="mb-8">
           <div className="flex items-center justify-between gap-4 flex-wrap">
-            <h1 className="text-4xl font-bold tracking-tight">ClickForge</h1>
+            <h1 className="text-4xl font-bold tracking-tight">CTRLab</h1>
             <div className="flex items-center gap-4">
               <Link href="/" className="text-sm text-gray-600 hover:text-gray-900 transition">
                 Home
@@ -872,7 +907,8 @@ export default function Home() {
               )}
             </div>
           </div>
-          <p className="mt-3 max-w-2xl text-sm text-gray-600">
+          <p className="mt-3 text-sm font-medium text-gray-500">AI YouTube CTR Optimizer</p>
+          <p className="mt-2 max-w-2xl text-sm text-gray-600">
             Generate strategic YouTube thumbnail concepts designed to improve click-through rate.
           </p>
         </div>
