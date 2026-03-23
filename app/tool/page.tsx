@@ -2,7 +2,7 @@
 
 import { useAuth, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import localforage from "localforage";
 
 // Configure IndexedDB/localForage for project storage once at module load.
@@ -111,12 +111,90 @@ export default function Home() {
   const [copiedIdeaId, setCopiedIdeaId] = useState<number | null>(null);
   const generatorRef = useRef<HTMLDivElement | null>(null);
   const projectsRef = useRef<HTMLDivElement | null>(null);
+  /** Horizontal variant row: Top Pick first for visibility (presentation-only sort). */
+  const variantScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Clerk auth: guest (signed out) = teaser; signed in = full experience (all concepts, analytics, images, persistence).
   const { isSignedIn } = useAuth();
   const isAuthenticated = !!isSignedIn;
   const isGuest = !isAuthenticated;
   const visibleConcepts = isAuthenticated ? concepts : concepts.slice(0, 2);
+
+  const conceptsForDisplay = useMemo(() => {
+    return [...visibleConcepts].sort((a, b) => {
+      if (a.isTopPick && !b.isTopPick) return -1;
+      if (!a.isTopPick && b.isTopPick) return 1;
+      return a.id - b.id;
+    });
+  }, [visibleConcepts]);
+
+  /** Horizontal variant strip: visible index range + scroll edges (UI only). */
+  const [variantStripView, setVariantStripView] = useState<{
+    start: number;
+    end: number;
+    total: number;
+    atStart: boolean;
+    atEnd: boolean;
+  }>({ start: 1, end: 1, total: 0, atStart: true, atEnd: true });
+
+  const updateVariantStripView = useCallback(() => {
+    const el = variantScrollRef.current;
+    if (!el) return;
+    const cards = el.querySelectorAll<HTMLElement>("[data-variant-card]");
+    const total = cards.length;
+    if (total === 0) {
+      setVariantStripView((prev) =>
+        prev.total === 0 && prev.start === 1 && prev.end === 1 && prev.atStart && prev.atEnd
+          ? prev
+          : { start: 1, end: 1, total: 0, atStart: true, atEnd: true }
+      );
+      return;
+    }
+    const cr = el.getBoundingClientRect();
+    let minI = Infinity;
+    let maxI = -1;
+    cards.forEach((card, i) => {
+      const r = card.getBoundingClientRect();
+      const overlap = Math.min(r.right, cr.right) - Math.max(r.left, cr.left);
+      // Wider overlap gate + fraction of card width reduces flicker at strip edges.
+      const minOverlap = Math.max(28, Math.min(r.width, cr.width) * 0.1);
+      if (overlap >= minOverlap) {
+        minI = Math.min(minI, i);
+        maxI = Math.max(maxI, i);
+      }
+    });
+    const atStart = el.scrollLeft <= 10;
+    const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 10;
+    const next =
+      maxI < 0 || minI === Infinity
+        ? { start: 1, end: total, total, atStart, atEnd }
+        : { start: minI + 1, end: maxI + 1, total, atStart, atEnd };
+
+    setVariantStripView((prev) => {
+      if (
+        prev.start === next.start &&
+        prev.end === next.end &&
+        prev.total === next.total &&
+        prev.atStart === next.atStart &&
+        prev.atEnd === next.atEnd
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
+
+  const scrollVariantStripBy = useCallback((direction: -1 | 1) => {
+    const root = variantScrollRef.current;
+    if (!root) return;
+    const first = root.querySelector<HTMLElement>("[data-variant-card]");
+    if (!first) return;
+    const styles = window.getComputedStyle(root);
+    const gapRaw = styles.columnGap || styles.gap;
+    const gap = Number.parseFloat(gapRaw) || 20;
+    const delta = first.offsetWidth + gap;
+    root.scrollBy({ left: direction * delta, behavior: "smooth" });
+  }, []);
 
   // Layout: three states — library, guest results, or project workspace.
   const isProjectOpen = !!activeProjectId;
@@ -235,6 +313,39 @@ export default function Home() {
       }
     })();
   }, [credits, hasLoadedCredits, isAuthenticated]);
+
+  // Horizontal variant row: smooth-scroll to start when pack or variant count changes (Top Pick is first).
+  useEffect(() => {
+    const el = variantScrollRef.current;
+    if (!el || conceptsForDisplay.length === 0) return;
+    requestAnimationFrame(() => {
+      el.scrollTo({ left: 0, behavior: "smooth" });
+      requestAnimationFrame(() => updateVariantStripView());
+    });
+  }, [activePackGeneratedAt, conceptsForDisplay.length, isProjectOpen, updateVariantStripView]);
+
+  // Track visible variant index range + scroll edges for carousel UI.
+  useEffect(() => {
+    const el = variantScrollRef.current;
+    if (!el) return;
+    const onScrollOrResize = () => updateVariantStripView();
+    el.addEventListener("scroll", onScrollOrResize, { passive: true });
+    const ro = new ResizeObserver(() => updateVariantStripView());
+    ro.observe(el);
+    window.addEventListener("resize", onScrollOrResize);
+    requestAnimationFrame(() => updateVariantStripView());
+    return () => {
+      el.removeEventListener("scroll", onScrollOrResize);
+      ro.disconnect();
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [
+    updateVariantStripView,
+    conceptsForDisplay.length,
+    concepts.length,
+    isAuthenticated,
+    activePackGeneratedAt,
+  ]);
 
   // Load projects: authenticated users from backend; guests have no project library.
   useEffect(() => {
@@ -871,47 +982,57 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 px-6 py-10 text-gray-900">
-      <div className="mx-auto max-w-6xl">
-        {/* Entry header */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between gap-4 flex-wrap">
-            <h1 className="text-4xl font-bold tracking-tight">CTRLab</h1>
-            <div className="flex items-center gap-4">
-              <Link href="/" className="text-sm text-gray-600 hover:text-gray-900 transition">
-                Home
-              </Link>
-              {isAuthenticated && (
-                <>
-                  {!hasLoadedCredits ? (
-                    <>
-                      <span className="text-xs font-medium uppercase tracking-wide text-gray-400">
-                        Loading…
-                      </span>
-                      <span className="text-sm font-medium text-gray-400">Credits: …</span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                        {plan === "pro" ? "Pro plan" : "Free plan"}
-                      </span>
-                      <span className="text-sm font-medium text-gray-600">Credits left: {credits}</span>
-                    </>
-                  )}
-                  <UserButton
-                    appearance={{
-                      elements: { avatarBox: "h-8 w-8" },
-                    }}
-                  />
-                </>
-              )}
-            </div>
+    <main className="relative min-h-screen bg-[#0B0B0F] text-white antialiased">
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-[min(50vh,520px)] opacity-40"
+        style={{
+          background:
+            "radial-gradient(ellipse 85% 55% at 50% -15%, rgba(99, 102, 241, 0.22), transparent 58%)",
+        }}
+      />
+      {/* Sticky top bar — matches landing page */}
+      <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-black/60 shadow-[0_1px_0_0_rgba(255,255,255,0.04)] backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
+          <Link href="/" className="min-w-0 shrink">
+            <span className="block text-xl font-bold tracking-tight text-white md:text-2xl">CTRLAB</span>
+            <span className="mt-0.5 block text-sm font-medium text-gray-400">Test what gets clicks</span>
+          </Link>
+          <div className="flex items-center gap-4">
+            <Link href="/" className="text-sm font-medium text-gray-400 transition hover:text-white">
+              Home
+            </Link>
+            {isAuthenticated && (
+              <>
+                {!hasLoadedCredits ? (
+                  <>
+                    <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Loading…
+                    </span>
+                    <span className="text-sm font-medium text-gray-400">Credits: …</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs font-medium uppercase tracking-wide text-gray-400">
+                      {plan === "pro" ? "Pro plan" : "Free plan"}
+                    </span>
+                    <span className="text-sm font-medium text-gray-300">Credits left: {credits}</span>
+                  </>
+                )}
+                <UserButton
+                  appearance={{
+                    elements: { avatarBox: "h-8 w-8" },
+                  }}
+                />
+              </>
+            )}
           </div>
-          <p className="mt-3 text-sm font-medium text-gray-500">AI YouTube CTR Optimizer</p>
-          <p className="mt-2 max-w-2xl text-sm text-gray-600">
-            Generate strategic YouTube thumbnail concepts designed to improve click-through rate.
-          </p>
         </div>
+      </header>
+
+      <div className="relative mx-auto max-w-6xl px-6 py-10 pb-16">
+        <p className="mb-10 max-w-2xl text-sm leading-relaxed text-gray-400">
+          Generate strategic YouTube thumbnail concepts designed to improve click-through rate.
+        </p>
 
         {/* Project Library view: generator + project library (no project open, no guest results) */}
         {isLibraryView && (
@@ -919,44 +1040,44 @@ export default function Home() {
             {/* Generator form */}
             <div
               ref={generatorRef}
-              className="mb-10 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
+              className="mb-10 rounded-2xl border border-white/[0.08] bg-[#141419] p-8 shadow-xl shadow-black/30"
             >
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-5 md:grid-cols-3">
                 <div>
-                  <label className="mb-2 block text-sm font-medium">Video title</label>
+                  <label className="mb-2 block text-sm font-medium text-gray-300">Video title</label>
                   <input
                     type="text"
                     value={videoTitle}
                     onChange={(e) => setVideoTitle(e.target.value)}
                     placeholder="e.g. I opened a sushi bar in Barcelona"
-                    className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none transition focus:border-black"
+                    className="w-full rounded-xl border border-white/[0.12] bg-[#0B0B0F] px-4 py-3 text-white placeholder:text-gray-500 outline-none transition focus:border-[#6366F1] focus:ring-1 focus:ring-[#6366F1]"
                   />
                 </div>
                 <div>
-                  <label className="mb-2 block text-sm font-medium">Niche</label>
+                  <label className="mb-2 block text-sm font-medium text-gray-300">Niche</label>
                   <input
                     type="text"
                     value={niche}
                     onChange={(e) => setNiche(e.target.value)}
                     placeholder="e.g. restaurant, business, sports, travel"
-                    className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none transition focus:border-black"
+                    className="w-full rounded-xl border border-white/[0.12] bg-[#0B0B0F] px-4 py-3 text-white placeholder:text-gray-500 outline-none transition focus:border-[#6366F1] focus:ring-1 focus:ring-[#6366F1]"
                   />
                 </div>
                 <div>
-                  <label className="mb-2 block text-sm font-medium">Audience</label>
+                  <label className="mb-2 block text-sm font-medium text-gray-300">Audience</label>
                   <input
                     type="text"
                     value={audience}
                     onChange={(e) => setAudience(e.target.value)}
                     placeholder="e.g. food lovers, entrepreneurs, beginners"
-                    className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none transition focus:border-black"
+                    className="w-full rounded-xl border border-white/[0.12] bg-[#0B0B0F] px-4 py-3 text-white placeholder:text-gray-500 outline-none transition focus:border-[#6366F1] focus:ring-1 focus:ring-[#6366F1]"
                   />
                 </div>
               </div>
 
               {/* Quick example prompts */}
-              <div className="mt-4 space-y-2 text-sm">
-                <p className="text-gray-500">Try an example:</p>
+              <div className="mt-6 space-y-2 text-sm">
+                <p className="text-gray-400">Try an example:</p>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -967,7 +1088,7 @@ export default function Home() {
                         audience: "food lovers",
                       })
                     }
-                    className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    className="rounded-full border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:border-white/[0.18] hover:bg-white/[0.08]"
                   >
                     I opened a sushi bar in Barcelona
                   </button>
@@ -980,7 +1101,7 @@ export default function Home() {
                         audience: "beginners",
                       })
                     }
-                    className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    className="rounded-full border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:border-white/[0.18] hover:bg-white/[0.08]"
                   >
                     I tried cold plunges for 30 days
                   </button>
@@ -993,7 +1114,7 @@ export default function Home() {
                         audience: "entrepreneurs",
                       })
                     }
-                    className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    className="rounded-full border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:border-white/[0.18] hover:bg-white/[0.08]"
                   >
                     Why most startups fail in year one
                   </button>
@@ -1006,25 +1127,29 @@ export default function Home() {
                         audience: "travel lovers",
                       })
                     }
-                    className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    className="rounded-full border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:border-white/[0.18] hover:bg-white/[0.08]"
                   >
                     Living in Bali for a month
                   </button>
                 </div>
               </div>
 
-              <div className="mt-6 flex flex-wrap items-center gap-3">
+              <div className="mt-8 flex flex-wrap items-center gap-3">
                 <button
                   onClick={handleGenerate}
                   disabled={loading}
-                  className="rounded-2xl bg-black px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-xl bg-[#6366F1] px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                  style={{
+                    boxShadow:
+                      "0 0 0 1px rgba(255,255,255,0.08) inset, 0 12px 32px -8px rgba(99, 102, 241, 0.5)",
+                  }}
                 >
                   {loading ? "Generating..." : "Generate CTR Pack"}
                 </button>
               </div>
 
               {error && (
-                <p className="mt-4 text-sm text-red-600">
+                <p className="mt-4 text-sm text-red-400">
                   {error}
                 </p>
               )}
@@ -1033,9 +1158,9 @@ export default function Home() {
             {/* Project Library: all projects, sorted by last updated */}
             {isAuthenticated && (
               <div ref={projectsRef} className="mb-10">
-                <h2 className="mb-4 text-lg font-semibold text-gray-900">Project Library</h2>
+                <h2 className="mb-4 text-lg font-semibold text-white">Project Library</h2>
                 {projects.length === 0 ? (
-                  <p className="text-sm text-gray-500">
+                  <p className="text-sm text-gray-400">
                     No projects yet. Generate a CTR pack above to create your first project.
                   </p>
                 ) : (
@@ -1052,25 +1177,25 @@ export default function Home() {
                         return (
                           <div
                             key={project.projectId}
-                            className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
+                            className="rounded-2xl border border-white/[0.08] bg-[#141419] p-5 shadow-lg shadow-black/20"
                           >
-                            <p className="truncate font-semibold text-gray-900">
+                            <p className="truncate font-semibold text-white">
                               {project.videoTitle || "Untitled project"}
                             </p>
-                            <p className="mt-1 text-xs text-gray-500">
+                            <p className="mt-1 text-xs text-gray-400">
                               {project.niche} • {project.audience}
                             </p>
-                            <p className="mt-1 text-xs text-gray-500">
+                            <p className="mt-1 text-xs text-gray-400">
                               {packCount} pack{packCount === 1 ? "" : "s"}
                             </p>
-                            <p className="mt-0.5 text-xs text-gray-400">
+                            <p className="mt-0.5 text-xs text-gray-500">
                               Created {created} · Updated {lastUpdated}
                             </p>
-                            <div className="mt-3 flex flex-wrap gap-2">
+                            <div className="mt-4 flex flex-wrap gap-2">
                               <button
                                 type="button"
                                 onClick={() => handleSelectProject(project.projectId)}
-                                className="rounded-xl bg-black px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                                className="rounded-xl bg-[#6366F1] px-3 py-1.5 text-xs font-medium text-white shadow-md shadow-indigo-500/25 hover:brightness-110"
                               >
                                 Open
                               </button>
@@ -1082,7 +1207,7 @@ export default function Home() {
                                     "Delete this project and all its packs?"
                                   )
                                 }
-                                className="rounded-xl border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                                className="rounded-xl border border-red-500/40 bg-transparent px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10"
                               >
                                 Delete
                               </button>
@@ -1111,7 +1236,7 @@ export default function Home() {
                     setError(null);
                     generatorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
                   }}
-                  className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-sm font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                 >
                   Back to generator
                 </button>
@@ -1124,10 +1249,10 @@ export default function Home() {
                 const project = projects.find((p) => p.projectId === activeProjectId);
                 if (!project) return null;
                 return (
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                    <p className="text-sm font-medium text-gray-700">
+                  <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-gray-400">
                       Project:{" "}
-                      <span className="font-semibold text-gray-900">
+                      <span className="font-semibold text-white">
                         {project.videoTitle || "Untitled project"}
                       </span>
                     </p>
@@ -1144,15 +1269,15 @@ export default function Home() {
                           handleGenerate();
                         }}
                         disabled={loading}
-                        className="rounded-xl bg-black px-4 py-2 text-xs font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="rounded-xl bg-[#6366F1] px-4 py-2 text-xs font-medium text-white shadow-md shadow-indigo-500/25 hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {loading ? "Generating new pack..." : "Generate New Pack"}
                       </button>
-                      <span className="h-4 w-px bg-gray-200" aria-hidden />
+                      <span className="h-4 w-px bg-white/10" aria-hidden />
                       <button
                         type="button"
                         onClick={() => setIsEditingQuery((prev) => !prev)}
-                        className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-xs font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                       >
                         {isEditingQuery ? "Close Query Editor" : "Edit Query"}
                       </button>
@@ -1167,7 +1292,7 @@ export default function Home() {
                           setError(null);
                           generatorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
                         }}
-                        className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-xs font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                       >
                         Back to projects
                       </button>
@@ -1176,14 +1301,14 @@ export default function Home() {
                         onClick={() =>
                           handleDeleteProject(undefined, "Delete this project and all saved packs?")
                         }
-                        className="rounded-xl border border-red-200 bg-white px-4 py-2 text-xs font-medium text-red-700 hover:bg-red-50"
+                        className="rounded-xl border border-red-500/40 bg-transparent px-4 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10"
                       >
                         Delete Project
                       </button>
                     </div>
                   </div>
                 );
-              })() )}
+              })())}
 
             {/* Inline query editor for the active project (authenticated only) */}
             {isAuthenticated &&
@@ -1192,11 +1317,11 @@ export default function Home() {
                 const project = projects.find((p) => p.projectId === activeProjectId);
                 if (!project) return null;
                 return (
-                  <div className="mb-4 rounded-2xl border border-gray-200 bg-white p-4 text-xs text-gray-700">
-                    <p className="mb-2 font-medium text-gray-900">Edit query</p>
-                    <div className="grid gap-3 md:grid-cols-3">
+                  <div className="mb-6 rounded-2xl border border-white/[0.08] bg-[#141419] p-6 text-xs text-gray-300">
+                    <p className="mb-3 font-medium text-white">Edit query</p>
+                    <div className="grid gap-4 md:grid-cols-3">
                       <div>
-                        <label className="mb-1 block font-medium">Video title</label>
+                        <label className="mb-1 block font-medium text-gray-400">Video title</label>
                         <input
                           type="text"
                           value={project.videoTitle}
@@ -1209,11 +1334,11 @@ export default function Home() {
                             );
                             setVideoTitle(value);
                           }}
-                          className="w-full rounded-xl border border-gray-300 px-3 py-2 outline-none transition focus:border-black"
+                          className="w-full rounded-xl border border-white/[0.12] bg-[#0B0B0F] px-3 py-2.5 text-sm text-white outline-none transition focus:border-[#6366F1] focus:ring-1 focus:ring-[#6366F1]"
                         />
                       </div>
                       <div>
-                        <label className="mb-1 block font-medium">Niche</label>
+                        <label className="mb-1 block font-medium text-gray-400">Niche</label>
                         <input
                           type="text"
                           value={project.niche}
@@ -1226,11 +1351,11 @@ export default function Home() {
                             );
                             setNiche(value);
                           }}
-                          className="w-full rounded-xl border border-gray-300 px-3 py-2 outline-none transition focus:border-black"
+                          className="w-full rounded-xl border border-white/[0.12] bg-[#0B0B0F] px-3 py-2.5 text-sm text-white outline-none transition focus:border-[#6366F1] focus:ring-1 focus:ring-[#6366F1]"
                         />
                       </div>
                       <div>
-                        <label className="mb-1 block font-medium">Audience</label>
+                        <label className="mb-1 block font-medium text-gray-400">Audience</label>
                         <input
                           type="text"
                           value={project.audience}
@@ -1243,7 +1368,7 @@ export default function Home() {
                             );
                             setAudience(value);
                           }}
-                          className="w-full rounded-xl border border-gray-300 px-3 py-2 outline-none transition focus:border-black"
+                          className="w-full rounded-xl border border-white/[0.12] bg-[#0B0B0F] px-3 py-2.5 text-sm text-white outline-none transition focus:border-[#6366F1] focus:ring-1 focus:ring-[#6366F1]"
                         />
                       </div>
                     </div>
@@ -1251,8 +1376,10 @@ export default function Home() {
                 );
               })()}
 
-            <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
-              <h2 className="text-2xl font-semibold">Thumbnail Concepts</h2>
+            <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
+              <h2 className="text-2xl font-bold tracking-tight text-white md:text-3xl">
+                Thumbnail Concepts
+              </h2>
               <div className="flex items-center gap-3">
                 {isAuthenticated && concepts.length > 0 && (
                   <button
@@ -1262,27 +1389,27 @@ export default function Home() {
                       setCopiedAllConcepts(true);
                       setTimeout(() => setCopiedAllConcepts(false), 1500);
                     }}
-                    className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                    className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-xs font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                   >
                     {copiedAllConcepts ? "Copied ✓" : "Copy all concepts"}
                   </button>
                 )}
-                <p className="text-sm text-gray-500">{concepts.length} variants generated</p>
+                <p className="text-sm text-gray-400">{concepts.length} variants generated</p>
               </div>
             </div>
 
             {/* Out-of-credits empty state (authenticated only) */}
             {isAuthenticated && credits <= 0 && concepts.length > 0 && (
-              <div className="mb-6 rounded-2xl border border-gray-200 bg-gray-50 p-5">
-                <h3 className="text-lg font-semibold text-gray-900">You&apos;re out of image credits</h3>
-                <p className="mt-2 text-sm text-gray-600">
+              <div className="mb-8 rounded-2xl border border-white/[0.08] bg-[#141419] p-6">
+                <h3 className="text-lg font-semibold text-white">You&apos;re out of image credits</h3>
+                <p className="mt-2 text-sm text-gray-400">
                   You&apos;ve used all your free credits for image generation.
                   More credits and upgrade options are coming soon.
                 </p>
                 <button
                   type="button"
                   disabled
-                  className="mt-4 rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-500"
+                  className="mt-4 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-sm font-medium text-gray-500"
                 >
                   Notify me when more credits are available
                 </button>
@@ -1292,12 +1419,12 @@ export default function Home() {
             {/* Saved packs for the active project (authenticated only) */}
             {isAuthenticated && activeProjectId && (
               <div className="mb-4">
-                <p className="mb-1 text-sm font-medium text-gray-900">Saved Packs</p>
+                <p className="mb-2 text-sm font-medium text-white">Saved Packs</p>
                 {(() => {
                   const project = projects.find((p) => p.projectId === activeProjectId);
                   if (!project || project.packs.length === 0) {
                     return (
-                      <p className="text-xs text-gray-500">
+                      <p className="text-xs text-gray-400">
                         No packs saved yet for this project.
                       </p>
                     );
@@ -1314,10 +1441,10 @@ export default function Home() {
                             <button
                               type="button"
                               onClick={() => handleSelectPack(pack.generatedAt)}
-                              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                              className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
                                 isActivePack
-                                  ? "border-black bg-black text-white"
-                                  : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                                  ? "border-[#6366F1] bg-[#6366F1] text-white shadow-md shadow-indigo-500/20"
+                                  : "border-white/[0.1] bg-white/[0.04] text-gray-300 hover:border-white/20 hover:bg-white/[0.08]"
                               }`}
                             >
                               {label} • {when}
@@ -1328,7 +1455,7 @@ export default function Home() {
                                 e.stopPropagation();
                                 handleDeletePack(project.projectId, pack.generatedAt);
                               }}
-                              className="rounded-full border border-gray-200 bg-white p-1 text-xs text-gray-500 hover:bg-red-50 hover:text-red-700"
+                              className="rounded-full border border-white/[0.1] bg-white/[0.04] p-1 text-xs text-gray-400 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400"
                               title="Delete this saved pack"
                             >
                               ×
@@ -1343,44 +1470,48 @@ export default function Home() {
             )}
 
             {!isAuthenticated && concepts.length > 0 && (
-              <div className="mb-6 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-gray-200 border-dashed bg-gray-50 p-4">
-                  <p className="text-sm font-medium text-gray-500">CTR analysis available with a free account</p>
+              <div className="mb-8 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-dashed border-white/[0.12] bg-[#141419]/80 p-5">
+                  <p className="text-sm font-medium text-gray-400">
+                    CTR analysis available with a free account
+                  </p>
                 </div>
-                <div className="rounded-2xl border border-gray-200 border-dashed bg-gray-50 p-4">
-                  <p className="text-sm font-medium text-gray-500">Top pick available with a free account</p>
+                <div className="rounded-2xl border border-dashed border-white/[0.12] bg-[#141419]/80 p-5">
+                  <p className="text-sm font-medium text-gray-400">
+                    Top pick available with a free account
+                  </p>
                 </div>
               </div>
             )}
 
             {isAuthenticated && concepts.length > 0 && (
-              <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                <h3 className="mb-3 text-lg font-semibold text-gray-900">AI Recommendation</h3>
+              <div className="mb-8 rounded-2xl border border-white/[0.08] bg-[#141419] p-6 shadow-xl shadow-black/30">
+                <h3 className="mb-4 text-lg font-semibold text-white">AI Recommendation</h3>
                 {!recommendation ? (
-                  <p className="text-sm text-gray-600">
+                  <p className="text-sm text-gray-400">
                     Recommendation needs to be regenerated after improving variants.
                   </p>
                 ) : (
                   <>
-                    <p className="mb-2 text-sm text-gray-600">
-                      <span className="font-medium text-gray-900">Best Variant:</span>{" "}
+                    <p className="mb-3 text-sm text-gray-300">
+                      <span className="font-medium text-[#a5b4fc]">Best Variant:</span>{" "}
                       {recommendation.bestVariantId}
                     </p>
-                    <div className="mb-3 text-sm text-gray-700">
-                      <p className="font-medium text-gray-900">Explanation</p>
-                      <p className="mt-1">{recommendation.explanation}</p>
+                    <div className="mb-4 text-sm text-gray-300">
+                      <p className="font-medium text-white">Explanation</p>
+                      <p className="mt-1.5 leading-relaxed text-gray-400">{recommendation.explanation}</p>
                     </div>
-                    <div className="mb-3 text-sm text-gray-700">
-                      <p className="font-medium text-gray-900">CTR Analysis</p>
-                      <p className="mt-1">{recommendation.ctrReasoning}</p>
+                    <div className="mb-4 text-sm text-gray-300">
+                      <p className="font-medium text-white">CTR Analysis</p>
+                      <p className="mt-1.5 leading-relaxed text-gray-400">{recommendation.ctrReasoning}</p>
                     </div>
                     {recommendation.stressTest && (
-                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-                        <p className="font-medium text-gray-900">Stress Test</p>
-                        <p className="mt-1.5 text-xs font-medium text-gray-600">What could fail:</p>
-                        <p className="mt-0.5">{recommendation.stressTest.risk}</p>
-                        <p className="mt-2 text-xs font-medium text-gray-600">How to improve:</p>
-                        <p className="mt-0.5">{recommendation.stressTest.improvement}</p>
+                      <div className="rounded-xl border border-white/[0.08] bg-[#0B0B0F] px-4 py-3 text-sm text-gray-300">
+                        <p className="font-medium text-white">Stress Test</p>
+                        <p className="mt-2 text-xs font-medium text-gray-500">What could fail:</p>
+                        <p className="mt-1 text-gray-400">{recommendation.stressTest.risk}</p>
+                        <p className="mt-3 text-xs font-medium text-gray-500">How to improve:</p>
+                        <p className="mt-1 text-gray-400">{recommendation.stressTest.improvement}</p>
                       </div>
                     )}
                   </>
@@ -1389,10 +1520,10 @@ export default function Home() {
             )}
 
             {isAuthenticated && activeProjectId && comparisonResult && (
-              <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                <h3 className="mb-3 text-lg font-semibold text-gray-900">Pack Comparison</h3>
-                <p className="mb-2 text-sm text-gray-700">
-                  <span className="font-medium text-gray-900">Winner:</span>{" "}
+              <div className="mb-8 rounded-2xl border border-white/[0.08] bg-[#141419] p-6 shadow-xl shadow-black/30">
+                <h3 className="mb-4 text-lg font-semibold text-white">Pack Comparison</h3>
+                <p className="mb-2 text-sm text-gray-300">
+                  <span className="font-medium text-[#a5b4fc]">Winner:</span>{" "}
                   {(() => {
                     const project = projects.find((p) => p.projectId === activeProjectId);
                     if (!project) return "Unknown pack";
@@ -1402,7 +1533,7 @@ export default function Home() {
                     return index >= 0 ? `Pack ${index + 1}` : "Unknown pack";
                   })()}
                 </p>
-                <p className="text-sm text-gray-700">{comparisonResult.reason}</p>
+                <p className="text-sm leading-relaxed text-gray-400">{comparisonResult.reason}</p>
               </div>
             )}
 
@@ -1412,7 +1543,7 @@ export default function Home() {
                 type="button"
                 onClick={handleImproveWeakVariants}
                 disabled={loading || improvingConceptIds.length > 0}
-                className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-sm font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {improvingConceptIds.length > 0 ? "Improving..." : "Improve Weak Variants"}
               </button>
@@ -1488,7 +1619,7 @@ export default function Home() {
                         setError("Unable to reach the server. Please try again.");
                       }
                     }}
-                    className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-sm font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                   >
                     Compare with previous pack
                   </button>
@@ -1496,42 +1627,203 @@ export default function Home() {
             </div>
             )}
 
-            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-              {visibleConcepts.map((concept) => (
+            {(() => {
+              const variantStripExpectedCount =
+                conceptsForDisplay.length +
+                (!isAuthenticated && concepts.length > 0 ? 3 : 0);
+              if (variantStripExpectedCount === 0) return null;
+              const stripTotal = variantStripView.total || variantStripExpectedCount || 1;
+              const rangeStart =
+                variantStripView.total > 0 ? variantStripView.start : 1;
+              const rangeEnd =
+                variantStripView.total > 0 ? variantStripView.end : Math.min(stripTotal, 3);
+              const mobilePositionIndex =
+                rangeStart === rangeEnd
+                  ? rangeStart
+                  : Math.round((rangeStart + rangeEnd) / 2);
+              return (
+            <div className="mb-0.5 sm:mb-1">
+              <div className="mb-1.5 flex items-center gap-1.5 sm:mb-2 sm:gap-3">
+                <button
+                  type="button"
+                  aria-label="Scroll variants left"
+                  disabled={variantStripView.atStart}
+                  onClick={() => scrollVariantStripBy(-1)}
+                  className="shrink-0 rounded-md border border-white/[0.12] bg-white/[0.04] p-1 text-gray-200 transition hover:border-white/25 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-35 sm:rounded-lg sm:p-1.5"
+                >
+                  <svg className="h-3.5 w-3.5 sm:h-4 sm:w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M15 18l-6-6 6-6"
+                    />
+                  </svg>
+                </button>
+                <div className="min-w-0 flex-1 px-0.5 sm:px-1">
+                  {/* Mobile: compact position; desktop: full range */}
+                  <div className="flex flex-col items-center gap-0 sm:gap-1">
+                    <p className="text-center leading-tight text-gray-200">
+                      <span className="inline-flex items-baseline gap-0.5 sm:hidden">
+                        <span className="text-[13px] font-semibold tabular-nums tracking-tight text-white">
+                          {mobilePositionIndex}
+                        </span>
+                        <span className="text-[11px] font-medium tabular-nums text-gray-500">
+                          /{stripTotal}
+                        </span>
+                      </span>
+                      <span className="hidden text-sm sm:inline">
+                        <span className="font-medium tabular-nums">
+                          {rangeStart}–{rangeEnd}
+                        </span>
+                        <span className="text-gray-500"> of </span>
+                        <span className="tabular-nums text-gray-400">{stripTotal}</span>
+                        <span className="text-gray-500"> visible</span>
+                      </span>
+                    </p>
+                  </div>
+                  <div
+                    className="mx-auto mt-1 flex max-w-[min(100%,14rem)] gap-px sm:mt-1.5 sm:max-w-xs sm:gap-0.5"
+                    role="presentation"
+                  >
+                    {Array.from({ length: stripTotal }, (_, i) => {
+                      const inView =
+                        variantStripView.total > 0 &&
+                        i >= variantStripView.start - 1 &&
+                        i <= variantStripView.end - 1;
+                      return (
+                        <div
+                          key={i}
+                          className={`h-1 min-w-[4px] flex-1 rounded-sm transition-[background-color] duration-300 ease-out sm:h-1.5 sm:min-w-[5px] ${
+                            inView ? "bg-[#6366F1]/80" : "bg-white/[0.1]"
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Scroll variants right"
+                  disabled={variantStripView.atEnd}
+                  onClick={() => scrollVariantStripBy(1)}
+                  className="shrink-0 rounded-md border border-white/[0.12] bg-white/[0.04] p-1 text-gray-200 transition hover:border-white/25 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-35 sm:rounded-lg sm:p-1.5"
+                >
+                  <svg className="h-3.5 w-3.5 sm:h-4 sm:w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M9 18l6-6-6-6"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+            <div className="relative -mx-1 px-1">
+              {/* Edge fade — more content remains readable */}
+              <div
+                className="pointer-events-none absolute inset-y-0 left-0 z-10 w-6 bg-gradient-to-r from-[#0B0B0F] via-[#0B0B0F]/50 to-transparent sm:w-8"
+                aria-hidden
+              />
+              <div
+                className="pointer-events-none absolute inset-y-0 right-0 z-10 w-6 bg-gradient-to-l from-[#0B0B0F] via-[#0B0B0F]/50 to-transparent sm:w-8"
+                aria-hidden
+              />
+              <div
+                ref={variantScrollRef}
+                className="flex flex-nowrap gap-5 overflow-x-auto overflow-y-visible scroll-smooth py-3 pl-1 pr-1 [-webkit-overflow-scrolling:touch] snap-x snap-proximity [scrollbar-width:thin]"
+              >
+              {conceptsForDisplay.map((concept) => (
                 <div
+                  data-variant-card
                   key={concept.id}
-                  className="relative rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
+                  className={`relative rounded-2xl border p-6 ${
+                    concept.isTopPick
+                      ? "z-10 origin-top bg-[#18181f] md:scale-[1.03] border-[#6366F1]/55 shadow-[0_0_0_1px_rgba(99,102,241,0.4),0_8px_32px_-4px_rgba(99,102,241,0.28),0_28px_64px_-16px_rgba(0,0,0,0.55)]"
+                      : "border-white/[0.06] bg-[#121217] opacity-[0.97] shadow-lg shadow-black/35"
+                  } w-[min(22rem,calc(100vw-2.5rem))] min-w-[260px] max-w-[22rem] shrink-0 snap-start`}
                 >
                   {isAuthenticated && improvingConceptIds.includes(concept.id) && (
-                    <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-white/80">
-                      <span className="text-sm font-medium text-gray-600">Regenerating...</span>
+                    <div
+                      className={`absolute inset-0 z-10 flex items-center justify-center rounded-2xl backdrop-blur-sm ${
+                        concept.isTopPick ? "bg-[#18181f]/92" : "bg-[#121217]/92"
+                      }`}
+                    >
+                      <span className="text-sm font-medium text-gray-300">Regenerating...</span>
+                    </div>
+                  )}
+
+                  {concept.isTopPick && (
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#a5b4fc]/95">
+                      Best option
+                    </p>
+                  )}
+                  {isAuthenticated && concept.isTopPick && (
+                    <div className="mb-4 inline-flex w-full max-w-full sm:w-auto">
+                      <span className="inline-flex items-center rounded-xl bg-[#6366F1]/35 px-4 py-2 text-sm font-semibold text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]">
+                        Most likely to win
+                      </span>
                     </div>
                   )}
 
                   <div className="mb-4 flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm text-gray-500">Strategy</p>
-                      <h3 className="text-xl font-semibold">{concept.strategy}</h3>
+                    <div className="min-w-0 flex-1 pr-1">
+                      <p
+                        className={`text-sm ${concept.isTopPick ? "text-gray-300" : "text-gray-400"}`}
+                      >
+                        Strategy
+                      </p>
+                      <h3
+                        className={`text-lg font-bold leading-snug tracking-tight sm:text-xl ${concept.isTopPick ? "text-white" : "text-gray-100"}`}
+                      >
+                        {concept.strategy}
+                      </h3>
                     </div>
-                    <div className="flex flex-col items-end gap-1 text-xs">
-                      <span className="rounded-full bg-gray-100 px-3 py-1 font-medium text-gray-600">
+                    <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
+                      <span
+                        className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
+                          concept.isTopPick
+                            ? "border-white/[0.1] bg-transparent text-gray-400"
+                            : "border-white/[0.08] bg-transparent text-gray-500"
+                        }`}
+                      >
                         Variant {concept.id}
                       </span>
                       {isAuthenticated && typeof concept.score === "number" && (
-                        <span className="rounded-full bg-green-50 px-3 py-1 text-[11px] font-medium text-green-700">
-                          CTR Score: {formatCtrScore(concept.score)} / 10
-                        </span>
+                        <div className="pt-0.5">
+                          <p className="mb-0.5 text-[9px] font-medium uppercase tracking-[0.14em] text-gray-500">
+                            CTR
+                          </p>
+                          <div className="flex items-baseline justify-end gap-0.5 leading-none">
+                            <span
+                              className={`tabular-nums font-bold ${
+                                concept.isTopPick
+                                  ? "text-[1.35rem] text-[#e0e7ff] sm:text-2xl"
+                                  : "text-lg font-semibold text-gray-200"
+                              }`}
+                            >
+                              {formatCtrScore(concept.score)}
+                            </span>
+                            <span
+                              className={`tabular-nums font-medium ${
+                                concept.isTopPick
+                                  ? "text-sm text-gray-400"
+                                  : "text-xs text-gray-500"
+                              }`}
+                            >
+                              /10
+                            </span>
+                          </div>
+                        </div>
                       )}
-                      {isAuthenticated && concept.isTopPick && (
-                          <span className="mt-1 rounded-full bg-yellow-100 px-3 py-1 text-[11px] font-semibold text-yellow-900">
-                            🏆 Top Pick
-                          </span>
-                        )}
                     </div>
                   </div>
 
                   {isAuthenticated && (
-                  <p className="mb-2 text-xs font-medium text-gray-600">
+                  <p className="mb-2 text-xs font-medium text-gray-400">
                     {concept.isImageLoading
                       ? "Rendering visual..."
                       : concept.imageUrl
@@ -1545,76 +1837,88 @@ export default function Home() {
                     </p>
                   )}
 
-                  {isAuthenticated && concept.isImageLoading && (
-                    <div
-                      className="mb-4 h-40 w-full animate-pulse rounded-xl border border-gray-200 bg-gray-200"
-                      aria-hidden
-                    />
-                  )}
-
-                  {isAuthenticated && concept.imageUrl && !concept.isImageLoading && (
-                    <div className="mb-4 overflow-hidden rounded-xl border border-gray-200">
-                      <img
-                        src={concept.imageUrl}
-                        alt={concept.strategy}
-                        className="h-40 w-full object-cover"
-                      />
+                  {/* Fixed-height preview slot — avoids layout shift when images load */}
+                  {isAuthenticated && (
+                    <div className="relative mb-4 h-40 w-full shrink-0 overflow-hidden rounded-xl border border-white/[0.1] bg-[#0B0B0F]">
+                      {concept.isImageLoading && (
+                        <div
+                          className="absolute inset-0 animate-pulse bg-white/[0.08]"
+                          aria-hidden
+                        />
+                      )}
+                      {!concept.isImageLoading && concept.imageUrl && (
+                        <img
+                          src={concept.imageUrl}
+                          alt={concept.strategy}
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                        />
+                      )}
+                      {!concept.isImageLoading && !concept.imageUrl && (
+                        <div className="flex h-full items-center justify-center px-2 text-center text-xs text-gray-500">
+                          No preview yet
+                        </div>
+                      )}
                     </div>
                   )}
 
                   {isAuthenticated && concept.imageUrl && !concept.isImageLoading && (
                     <div className="mb-4">
-                      <p className="mb-2 text-xs font-medium text-gray-600">Visibility Test</p>
+                      <p className="mb-2 text-xs font-medium text-gray-400">Visibility Test</p>
                       <div className="flex flex-wrap gap-3">
-                        <div className="overflow-hidden rounded-lg border border-gray-200">
+                        <div className="overflow-hidden rounded-lg border border-white/[0.1]">
                           <img
                             src={concept.imageUrl}
                             alt={`${concept.strategy} at 120px`}
                             className="h-[68px] w-[120px] object-cover"
                           />
-                          <p className="border-t border-gray-100 bg-gray-50 px-2 py-1 text-[10px] text-gray-500">120px (mobile)</p>
+                          <p className="border-t border-white/[0.06] bg-[#0B0B0F] px-2 py-1 text-[10px] text-gray-400">
+                            120px (mobile)
+                          </p>
                         </div>
-                        <div className="overflow-hidden rounded-lg border border-gray-200">
+                        <div className="overflow-hidden rounded-lg border border-white/[0.1]">
                           <img
                             src={concept.imageUrl}
                             alt={`${concept.strategy} at 180px`}
                             className="h-[101px] w-[180px] object-cover"
                           />
-                          <p className="border-t border-gray-100 bg-gray-50 px-2 py-1 text-[10px] text-gray-500">180px (suggested)</p>
+                          <p className="border-t border-white/[0.06] bg-[#0B0B0F] px-2 py-1 text-[10px] text-gray-400">
+                            180px (suggested)
+                          </p>
                         </div>
                       </div>
                     </div>
                   )}
 
-                  <div className="mb-4 rounded-xl bg-gray-100 p-4">
+                  <div className="mb-5 rounded-xl border border-white/[0.08] bg-[#0B0B0F] p-4">
                     <p className="text-xs uppercase tracking-wide text-gray-500">Overlay text</p>
-                    <p className="mt-2 text-2xl font-bold">{concept.overlayText}</p>
+                    <p className="mt-2 text-2xl font-bold text-white">{concept.overlayText}</p>
                   </div>
 
-                  <div className="space-y-3 text-sm text-gray-700">
+                  <div className="space-y-4 text-sm text-gray-300">
                     <div>
-                      <p className="font-medium text-gray-900">Composition</p>
-                      <p>{concept.composition}</p>
+                      <p className="font-medium text-white">Composition</p>
+                      <p className="mt-1 leading-relaxed text-gray-400">{concept.composition}</p>
                     </div>
                     <div>
-                      <p className="font-medium text-gray-900">Emotion</p>
-                      <p>{concept.emotion}</p>
+                      <p className="font-medium text-white">Emotion</p>
+                      <p className="mt-1 leading-relaxed text-gray-400">{concept.emotion}</p>
                     </div>
                     <div>
-                      <p className="font-medium text-gray-900">Colors</p>
-                      <p>{concept.colors}</p>
+                      <p className="font-medium text-white">Colors</p>
+                      <p className="mt-1 leading-relaxed text-gray-400">{concept.colors}</p>
                     </div>
 
                     {(concept.titleSuggestion ||
                       concept.titleReason ||
                       typeof concept.titleFitScore === "number") && (
-                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                      <div className="rounded-xl border border-white/[0.08] bg-[#0B0B0F] px-4 py-3 text-sm text-gray-300">
                         {concept.titleSuggestion && (
                           <>
                             <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
                               Suggested Title
                             </p>
-                            <p className="mt-1 font-medium text-gray-900">{concept.titleSuggestion}</p>
+                            <p className="mt-1 font-medium text-white">{concept.titleSuggestion}</p>
                             <button
                               type="button"
                               onClick={() => {
@@ -1624,7 +1928,7 @@ export default function Home() {
                                   setTimeout(() => setCopiedTitleId(null), 1500);
                                 }
                               }}
-                              className="mt-2 rounded-lg border border-gray-300 px-3 py-1 text-xs font-medium hover:bg-gray-50 transition"
+                              className="mt-2 rounded-lg border border-white/[0.12] bg-white/[0.04] px-3 py-1 text-xs font-medium text-gray-200 transition hover:border-white/20 hover:bg-white/[0.08]"
                             >
                               {copiedTitleId === concept.id ? "Copied ✓" : "Copy title"}
                             </button>
@@ -1632,12 +1936,12 @@ export default function Home() {
                         )}
                         {concept.titleReason && (
                           <>
-                            <p className="mt-2 text-xs font-medium text-gray-600">Why this title works</p>
-                            <p className="mt-0.5 text-gray-700">{concept.titleReason}</p>
+                            <p className="mt-2 text-xs font-medium text-gray-500">Why this title works</p>
+                            <p className="mt-0.5 text-gray-400">{concept.titleReason}</p>
                           </>
                         )}
                         {isAuthenticated && typeof concept.titleFitScore === "number" && (
-                          <p className="mt-2 text-xs text-gray-600">
+                          <p className="mt-2 text-xs text-gray-400">
                             Title Fit: {concept.titleFitScore}/10
                           </p>
                         )}
@@ -1646,8 +1950,8 @@ export default function Home() {
 
                     {concept.scoreReason && (
                       <div>
-                        <p className="font-medium text-gray-900">Why this could work</p>
-                        <p className="text-gray-700">{concept.scoreReason}</p>
+                        <p className="font-medium text-white">Why this could work</p>
+                        <p className="mt-1 text-gray-400">{concept.scoreReason}</p>
                       </div>
                     )}
 
@@ -1655,8 +1959,8 @@ export default function Home() {
                       typeof concept.emotionScore === "number" ||
                       typeof concept.clarityScore === "number" ||
                       typeof concept.competitionScore === "number") && (
-                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                        <p className="mb-1.5 font-medium text-gray-700">CTR Breakdown</p>
+                      <div className="rounded-xl border border-white/[0.08] bg-[#0B0B0F] px-4 py-3 text-xs text-gray-400">
+                        <p className="mb-2 font-medium text-gray-300">CTR Breakdown</p>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
                           {typeof concept.curiosityScore === "number" && (
                             <span>Curiosity: {concept.curiosityScore}/10</span>
@@ -1676,12 +1980,12 @@ export default function Home() {
                   </div>
 
                   {isAuthenticated && concept.imageError && (
-                    <p className="mt-3 text-xs text-red-600">
+                    <p className="mt-3 text-xs text-red-400">
                       {concept.imageError}
                     </p>
                   )}
 
-                  <div className="mt-5 flex flex-wrap gap-2">
+                  <div className="mt-6 flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => {
@@ -1689,7 +1993,7 @@ export default function Home() {
                         setCopiedIdeaId(concept.id);
                         setTimeout(() => setCopiedIdeaId(null), 1500);
                       }}
-                      className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50"
+                      className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-sm font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                     >
                       {copiedIdeaId === concept.id ? "Copied ✓" : "Copy idea"}
                     </button>
@@ -1701,23 +2005,23 @@ export default function Home() {
                         setCopiedPromptId(concept.id);
                         setTimeout(() => setCopiedPromptId(null), 1500);
                       }}
-                      className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50"
+                      className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-4 py-2 text-sm font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                     >
                       {copiedPromptId === concept.id ? "Copied prompt ✓" : "Copy image prompt"}
                     </button>
                     )}
                     {isAuthenticated && credits <= 0 && (
-                      <div className="rounded-xl border border-gray-200 bg-gray-100 px-4 py-3">
-                        <p className="text-sm font-medium text-gray-600">Out of credits</p>
+                      <div className="rounded-xl border border-white/[0.1] bg-[#0B0B0F] px-4 py-3">
+                        <p className="text-sm font-medium text-gray-300">Out of credits</p>
                         <p className="mt-0.5 text-xs text-gray-500">
                           You&apos;ve used all your free image credits.
                         </p>
-                        <p className="mt-1 text-xs text-gray-400">More credits coming soon.</p>
+                        <p className="mt-1 text-xs text-gray-500">More credits coming soon.</p>
                       </div>
                     )}
                     {isAuthenticated && credits > 0 && (
                     <button
-                      className="rounded-xl bg-black px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-xl bg-[#6366F1] px-4 py-2 text-sm font-semibold text-white shadow-md shadow-indigo-500/25 hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                       onClick={() => handleGenerateImage(concept.id)}
                       disabled={concept.isImageLoading}
                     >
@@ -1730,7 +2034,7 @@ export default function Home() {
                     )}
                     {!isAuthenticated && (
                       <div className="flex flex-col gap-1">
-                        <span className="rounded-xl border border-gray-200 bg-gray-100 px-4 py-2 text-center text-sm font-medium text-gray-500">
+                        <span className="rounded-xl border border-white/[0.1] bg-white/[0.04] px-4 py-2 text-center text-sm font-medium text-gray-500">
                           Generate image
                         </span>
                         <p className="text-xs text-gray-500">Sign up to unlock</p>
@@ -1740,7 +2044,7 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => handleDownloadImage(concept.imageUrl!, concept.id)}
-                        className="rounded-xl border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-gray-200 hover:border-white/20 hover:bg-white/[0.08]"
                       >
                         Download
                       </button>
@@ -1751,41 +2055,46 @@ export default function Home() {
               {!isAuthenticated && concepts.length > 0 &&
                 [1, 2, 3].map((i) => (
                   <div
+                    data-variant-card
                     key={`locked-${i}`}
-                    className="relative rounded-2xl border border-gray-200 border-dashed bg-gray-50 p-5 opacity-90"
+                    className="relative w-[min(22rem,calc(100vw-2.5rem))] min-w-[260px] max-w-[22rem] shrink-0 snap-start rounded-2xl border border-dashed border-white/[0.12] bg-[#141419]/60 p-5 opacity-95"
                   >
                     <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-2 text-center">
-                      <p className="text-sm font-semibold text-gray-500">Locked concept</p>
+                      <p className="text-sm font-semibold text-gray-400">Locked concept</p>
                       <p className="text-xs text-gray-500">Sign up to unlock</p>
                     </div>
                   </div>
                 ))}
+              </div>
             </div>
+            </div>
+            );
+            })()}
 
             {/* Guest upsell: unlock full pack */}
             {!isAuthenticated && concepts.length > 0 && (
-              <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-                <h3 className="text-lg font-semibold text-gray-900">Unlock the full CTR pack</h3>
-                <p className="mt-3 text-sm text-gray-600">
+              <div className="mt-10 rounded-2xl border border-white/[0.08] bg-[#141419] p-8 shadow-xl shadow-black/30">
+                <h3 className="text-lg font-semibold text-white">Unlock the full CTR pack</h3>
+                <p className="mt-3 text-sm text-gray-400">
                   Create a free account to unlock:
                 </p>
-                <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-gray-600">
+                <ul className="mt-3 list-inside list-disc space-y-1.5 text-sm text-gray-400">
                   <li>all 5 concepts</li>
                   <li>CTR analysis</li>
                   <li>top pick</li>
                   <li>image generation</li>
                   <li>saved projects</li>
                 </ul>
-                <div className="mt-5 flex flex-wrap gap-3">
+                <div className="mt-6 flex flex-wrap gap-3">
                   <Link
                     href="/sign-up"
-                    className="rounded-2xl bg-black px-5 py-2.5 text-sm font-semibold text-white transition hover:opacity-90"
+                    className="rounded-xl bg-[#6366F1] px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:brightness-110"
                   >
                     Create free account
                   </Link>
                   <Link
                     href="/sign-in"
-                    className="rounded-2xl border border-gray-300 bg-white px-5 py-2.5 text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
+                    className="rounded-xl border border-white/[0.12] bg-white/[0.04] px-5 py-2.5 text-sm font-semibold text-gray-200 transition hover:border-white/20 hover:bg-white/[0.08]"
                   >
                     Sign in
                   </Link>
