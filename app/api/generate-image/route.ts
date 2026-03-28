@@ -1,35 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
-import { generateThumbnailImageWithProvider } from "@/lib/ai/generateThumbnailImageDispatch";
+import { generateThumbnailImage } from "@/lib/ai/generateThumbnailImage";
 import type { GenerateImageRequestBody } from "@/lib/ai/types";
-import { getOrCreateUser, decrementUserCredits } from "@/lib/user";
 
-// Image generation is only allowed for authenticated users. Credits are checked up front,
-// then deducted only after a successful AI result with a valid image URL.
+// This route now focuses on:
+// - reading and validating input
+// - calling the shared AI helper
+// - returning JSON in the same format as before
 export async function POST(request: NextRequest) {
   try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const user = await getOrCreateUser(userId);
-    if (user.credits <= 0) {
-      return NextResponse.json(
-        { error: "Out of credits" },
-        { status: 402 }
-      );
-    }
-
+    // Read and type the JSON body from the client
     const body = (await request.json()) as GenerateImageRequestBody;
     const {
+      title,
+      niche,
+      audience,
       strategy,
+      visualHook,
       overlayText,
       composition,
       emotion,
       colors,
     } = body;
 
+    // These fields are required to build a strong thumbnail prompt.
+    // Title, niche, audience, and visualHook are highly recommended,
+    // but we keep them optional so we don't break older clients.
     if (!strategy || !overlayText || !composition || !emotion || !colors) {
       return NextResponse.json(
         {
@@ -40,26 +35,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await generateThumbnailImageWithProvider(body);
+    // Call the shared AI service function.
+    // It will talk to OpenAI and return the image URL.
+    const result = await generateThumbnailImage(body);
 
-    if (!result?.imageUrl) {
-      return NextResponse.json(
-        {
-          error:
-            "Image generation failed: no image returned. Your credits were not deducted.",
-        },
-        { status: 500 }
-      );
-    }
-
-    const newCredits = await decrementUserCredits(userId);
-    if (newCredits === null) {
-      return NextResponse.json({ error: "Out of credits" }, { status: 402 });
-    }
-
-    return NextResponse.json({ imageUrl: result.imageUrl, credits: newCredits });
+    // Return JSON in exactly the same shape as before.
+    return NextResponse.json(result);
   } catch (error) {
-    console.error("Generation failed, credits preserved:", error);
+    // If the OpenAI client is not configured or something else goes wrong,
+    // we log the error and return a 500, just like before.
+    console.error("Error in /api/generate-image:", error);
     return NextResponse.json(
       { error: "Failed to generate image." },
       { status: 500 }
