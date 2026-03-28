@@ -4,8 +4,8 @@ import { generateThumbnailImageWithProvider } from "@/lib/ai/generateThumbnailIm
 import type { GenerateImageRequestBody } from "@/lib/ai/types";
 import { getOrCreateUser, decrementUserCredits } from "@/lib/user";
 
-// Image generation is only allowed for authenticated users. Credits are checked and
-// decremented before the expensive AI call so we never run generation without a credit.
+// Image generation is only allowed for authenticated users. Credits are checked up front,
+// then deducted only after a successful AI result with a valid image URL.
 export async function POST(request: NextRequest) {
   try {
     const { userId } = await auth();
@@ -15,14 +15,6 @@ export async function POST(request: NextRequest) {
 
     const user = await getOrCreateUser(userId);
     if (user.credits <= 0) {
-      return NextResponse.json(
-        { error: "Out of credits" },
-        { status: 402 }
-      );
-    }
-
-    const newCredits = await decrementUserCredits(userId);
-    if (newCredits === null) {
       return NextResponse.json(
         { error: "Out of credits" },
         { status: 402 }
@@ -50,9 +42,24 @@ export async function POST(request: NextRequest) {
 
     const result = await generateThumbnailImageWithProvider(body);
 
+    if (!result?.imageUrl) {
+      return NextResponse.json(
+        {
+          error:
+            "Image generation failed: no image returned. Your credits were not deducted.",
+        },
+        { status: 500 }
+      );
+    }
+
+    const newCredits = await decrementUserCredits(userId);
+    if (newCredits === null) {
+      return NextResponse.json({ error: "Out of credits" }, { status: 402 });
+    }
+
     return NextResponse.json({ imageUrl: result.imageUrl, credits: newCredits });
   } catch (error) {
-    console.error("Error in /api/generate-image:", error);
+    console.error("Generation failed, credits preserved:", error);
     return NextResponse.json(
       { error: "Failed to generate image." },
       { status: 500 }
