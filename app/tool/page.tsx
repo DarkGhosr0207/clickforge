@@ -1001,6 +1001,9 @@ export default function Home() {
             <Link href="/" className="text-sm font-medium text-gray-400 transition hover:text-white">
               Home
             </Link>
+            <Link href="/pricing" className="text-sm font-medium text-gray-400 transition hover:text-white">
+              Pricing
+            </Link>
             {isAuthenticated && (
               <>
                 {!hasLoadedCredits ? (

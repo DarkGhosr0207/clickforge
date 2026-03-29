@@ -28,6 +28,12 @@ export default function Home() {
             </span>
           </Link>
           <nav className="flex shrink-0 items-center gap-3 sm:gap-4">
+            <Link
+              href="/pricing"
+              className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-white transition hover:border-white"
+            >
+              Pricing
+            </Link>
             {!isAuthenticated && (
               <Link
                 href="/sign-in"
