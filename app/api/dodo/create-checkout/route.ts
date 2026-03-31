@@ -1,7 +1,7 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-const DODO_PAYMENTS_URL = "https://test.dodopayments.com/payments";
+const DODO_PAYMENTS_URL = "https://api.dodopayments.com/payments";
 
 export async function POST() {
   const { userId } = await auth();
