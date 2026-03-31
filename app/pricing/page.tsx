@@ -2,102 +2,54 @@
 
 import { useUser } from "@clerk/nextjs";
 import Link from "next/link";
-import Script from "next/script";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 const BG = "#0B0B0F";
 const CARD = "#141419";
 const ACCENT = "#6366F1";
 
-type PayPalNamespace = {
-  Buttons: (options: {
-    createOrder: () => Promise<string>;
-    onApprove: (data: { orderID: string }) => Promise<void>;
-    onError?: (err: unknown) => void;
-  }) => { render: (container: HTMLElement | string) => void };
-};
-
-declare global {
-  interface Window {
-    paypal?: PayPalNamespace;
-  }
-}
-
 export default function PricingPage() {
   const { isLoaded, isSignedIn } = useUser();
-  const [sdkLoaded, setSdkLoaded] = useState(false);
-  const [paymentMessage, setPaymentMessage] = useState<string | null>(null);
-  const paypalContainerRef = useRef<HTMLDivElement | null>(null);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [showSuccess, setShowSuccess] = useState(false);
 
   useEffect(() => {
-    if (!sdkLoaded || !isLoaded || !isSignedIn) return;
-    const paypal = typeof window !== "undefined" ? window.paypal : undefined;
-    const el = paypalContainerRef.current;
-    if (!paypal?.Buttons || !el) return;
-    if (el.childElementCount > 0) return;
+    if (typeof window === "undefined") return;
+    if (window.location.search.includes("success=true")) {
+      setShowSuccess(true);
+    }
+  }, []);
 
-    paypal
-      .Buttons({
-        createOrder: async () => {
-          const res = await fetch("/api/paypal/create-order", { method: "POST" });
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(
-              typeof err === "object" && err && "error" in err
-                ? String((err as { error: string }).error)
-                : "Failed to create order"
-            );
-          }
-          const data = (await res.json()) as { orderID: string };
-          return data.orderID;
-        },
-        onApprove: async (data) => {
-          setPaymentMessage(null);
-          try {
-            const res = await fetch("/api/paypal/capture-order", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ orderID: data.orderID }),
-            });
-            if (!res.ok) {
-              setPaymentMessage("Payment failed. Please try again.");
-              return;
-            }
-            setPaymentMessage("Payment successful! 100 credits added.");
-            window.setTimeout(() => {
-              window.location.reload();
-            }, 1200);
-          } catch {
-            setPaymentMessage("Payment failed. Please try again.");
-          }
-        },
-        onError: (err) => {
-          console.error("[PayPal]", err);
-          setPaymentMessage("Payment failed. Please try again.");
-        },
-      })
-      .render(el);
-
-    return () => {
-      el.innerHTML = "";
-    };
-  }, [sdkLoaded, isLoaded, isSignedIn]);
-
-  const clientId = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID ?? "";
+  async function handleDodoCheckout() {
+    setCheckoutError(null);
+    setCheckoutLoading(true);
+    try {
+      const res = await fetch("/api/dodo/create-checkout", { method: "POST" });
+      if (!res.ok) {
+        setCheckoutError("Something went wrong. Please try again.");
+        setCheckoutLoading(false);
+        return;
+      }
+      const data = (await res.json()) as { url?: unknown };
+      if (typeof data.url !== "string" || data.url.length === 0) {
+        setCheckoutError("Something went wrong. Please try again.");
+        setCheckoutLoading(false);
+        return;
+      }
+      window.location.href = data.url;
+    } catch (err) {
+      console.error("[Dodo checkout]", err);
+      setCheckoutError("Something went wrong. Please try again.");
+      setCheckoutLoading(false);
+    }
+  }
 
   return (
     <main
       className="min-h-screen text-white antialiased"
       style={{ backgroundColor: BG }}
     >
-      {clientId ? (
-        <Script
-          src={`https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD`}
-          strategy="afterInteractive"
-          onLoad={() => setSdkLoaded(true)}
-        />
-      ) : null}
-
       <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-black/60 shadow-[0_1px_0_0_rgba(255,255,255,0.04)] backdrop-blur-md">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-4 md:px-8">
           <Link href="/" className="group min-w-0 shrink">
@@ -148,6 +100,12 @@ export default function PricingPage() {
           <p className="mx-auto mt-4 max-w-xl text-center text-pretty text-gray-400">
             Start free with 10 credits, or unlock 100 credits with a one-time Pro purchase.
           </p>
+
+          {showSuccess && (
+            <div className="mx-auto mt-8 max-w-2xl rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-center text-sm font-medium text-emerald-300">
+              Payment successful! 100 credits have been added to your account.
+            </div>
+          )}
 
           <div className="mt-14 grid gap-8 md:grid-cols-2 md:gap-10">
             {/* Free */}
@@ -254,30 +212,26 @@ export default function PricingPage() {
                     Sign in to purchase
                   </Link>
                 )}
-                {isLoaded && isSignedIn && !clientId && (
-                  <p className="text-center text-sm text-amber-200/90">
-                    PayPal is not configured (missing client ID).
-                  </p>
-                )}
-                {isLoaded && isSignedIn && !!clientId && !sdkLoaded && (
-                  <div className="flex h-12 items-center justify-center rounded-xl border border-white/10 bg-black/30 text-sm text-gray-400">
-                    Loading PayPal…
-                  </div>
-                )}
-                {isLoaded && isSignedIn && sdkLoaded && !!clientId && (
-                  <div ref={paypalContainerRef} className="min-h-[45px] w-full" />
+                {isLoaded && isSignedIn && (
+                  <button
+                    type="button"
+                    onClick={handleDodoCheckout}
+                    disabled={checkoutLoading}
+                    className="flex h-12 w-full items-center justify-center rounded-xl text-sm font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
+                    style={{
+                      backgroundColor: ACCENT,
+                      boxShadow:
+                        "0 0 0 1px rgba(255,255,255,0.1) inset, 0 8px 24px -8px rgba(99, 102, 241, 0.55)",
+                    }}
+                  >
+                    {checkoutLoading ? "Redirecting…" : "Get 100 Credits — $12"}
+                  </button>
                 )}
               </div>
 
-              {paymentMessage && (
-                <p
-                  className={`mt-4 text-center text-sm font-medium ${
-                    paymentMessage.startsWith("Payment successful")
-                      ? "text-emerald-400"
-                      : "text-rose-300"
-                  }`}
-                >
-                  {paymentMessage}
+              {checkoutError && (
+                <p className="mt-4 text-center text-sm font-medium text-rose-300">
+                  {checkoutError}
                 </p>
               )}
             </article>
