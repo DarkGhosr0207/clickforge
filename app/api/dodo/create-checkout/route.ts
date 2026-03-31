@@ -56,7 +56,7 @@ export async function POST() {
           name: customerName,
           create_new_customer: false,
         },
-        items: [
+        product_cart: [
           {
             product_id: productId,
             quantity: 1,
