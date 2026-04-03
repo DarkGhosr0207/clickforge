@@ -1,12 +1,19 @@
+import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { generateThumbnailImage } from "@/lib/ai/generateThumbnailImage";
 import type { GenerateImageRequestBody } from "@/lib/ai/types";
+import { decrementUserCredits } from "@/lib/user";
 
 // This route now focuses on:
 // - reading and validating input
 // - calling the shared AI helper
 // - returning JSON in the same format as before
 export async function POST(request: NextRequest) {
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     // Read and type the JSON body from the client
     const body = (await request.json()) as GenerateImageRequestBody;
@@ -38,6 +45,14 @@ export async function POST(request: NextRequest) {
     // Call the shared AI service function.
     // It will talk to OpenAI and return the image URL.
     const result = await generateThumbnailImage(body);
+
+    const newCredits = await decrementUserCredits(userId);
+    if (newCredits === null) {
+      return NextResponse.json(
+        { error: "Insufficient credits" },
+        { status: 402 }
+      );
+    }
 
     // Return JSON in exactly the same shape as before.
     return NextResponse.json(result);
