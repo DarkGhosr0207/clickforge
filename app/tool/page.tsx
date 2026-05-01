@@ -47,6 +47,7 @@ type Project = {
 
 // Temporary storage key for guest-generated pack (carried over after sign-up/sign-in).
 const PENDING_GUEST_PACK_KEY = "ctrPendingGuestPack";
+const LAST_ACTIVE_PROJECT_KEY = "ctrLastActiveProjectId";
 
 /** IndexedDB name used before the CTRLab rebrand (localForage default instance). */
 const LEGACY_LOCALFORAGE_DB = "ctr-pack-generator";
@@ -93,6 +94,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [concepts, setConcepts] = useState<ThumbnailConcept[]>([]);
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
+  const [isRegeneratingRec, setIsRegeneratingRec] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [improvingConceptIds, setImprovingConceptIds] = useState<number[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -236,6 +238,25 @@ export default function Home() {
     }
   }, [isAuthenticated, loadCurrentUser]);
 
+  // Guest: restore last generated pack after reload (kept in localforage).
+  useEffect(() => {
+    if (typeof window === "undefined" || isAuthenticated) return;
+    (async () => {
+      try {
+        await ensureLocalForageMigrated();
+        const pending = await localforage.getItem<PendingGuestPack>(PENDING_GUEST_PACK_KEY);
+        if (!pending) return;
+        setConcepts(attachTopPick(pending.data.thumbnails));
+        setRecommendation(pending.data.recommendation ?? null);
+        setVideoTitle(pending.videoTitle);
+        setNiche(pending.niche);
+        setAudience(pending.audience);
+      } catch (err) {
+        console.error("Failed to restore pending guest pack:", err);
+      }
+    })();
+  }, [isAuthenticated]);
+
   // Refresh plan/credits when window regains focus or tab becomes visible (authenticated only).
   useEffect(() => {
     if (typeof window === "undefined" || !isAuthenticated) return;
@@ -302,6 +323,22 @@ export default function Home() {
     })();
   }, [isAuthenticated]);
 
+  // Authenticated: persist last active project id to localforage.
+  useEffect(() => {
+    if (typeof window === "undefined" || !isAuthenticated) return;
+    (async () => {
+      try {
+        if (activeProjectId) {
+          await localforage.setItem(LAST_ACTIVE_PROJECT_KEY, activeProjectId);
+        } else {
+          await localforage.removeItem(LAST_ACTIVE_PROJECT_KEY);
+        }
+      } catch (err) {
+        console.error("Failed to persist last active project:", err);
+      }
+    })();
+  }, [activeProjectId, isAuthenticated]);
+
   // Persist credits to localforage only for guests (signed-in users use backend).
   useEffect(() => {
     if (typeof window === "undefined" || !hasLoadedCredits || isAuthenticated) return;
@@ -357,6 +394,26 @@ export default function Home() {
           if (res.ok) {
             const data = (await res.json()) as { projects: Project[] };
             setProjects(data.projects);
+            try {
+              const lastActive = await localforage.getItem<string>(LAST_ACTIVE_PROJECT_KEY);
+              if (!lastActive) return;
+              const project = data.projects.find((p) => p.projectId === lastActive);
+              if (!project) return;
+              const sortedPacks = [...project.packs].sort(
+                (a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime()
+              );
+              const latestPack = sortedPacks[0];
+              if (!latestPack) return;
+              setActiveProjectId(project.projectId);
+              setActivePackGeneratedAt(latestPack.generatedAt);
+              setVideoTitle(project.videoTitle);
+              setNiche(project.niche);
+              setAudience(project.audience);
+              setConcepts(latestPack.data.thumbnails);
+              setRecommendation(latestPack.data.recommendation ?? null);
+            } catch (err) {
+              console.error("Failed to restore last active project:", err);
+            }
           }
         } catch (err) {
           console.error("Failed to load projects from API:", err);
@@ -1491,9 +1548,46 @@ export default function Home() {
               <div className="mb-8 rounded-2xl border border-white/[0.08] bg-[#141419] p-6 shadow-xl shadow-black/30">
                 <h3 className="mb-4 text-lg font-semibold text-white">AI Recommendation</h3>
                 {!recommendation ? (
-                  <p className="text-sm text-gray-400">
-                    Recommendation needs to be regenerated after improving variants.
-                  </p>
+                  <>
+                    <p className="text-sm text-gray-400">
+                      Recommendation needs to be regenerated after improving variants.
+                    </p>
+                    {isAuthenticated && activeProjectId && activePackGeneratedAt && (
+                      <button
+                        type="button"
+                        disabled={isRegeneratingRec}
+                        onClick={async () => {
+                          if (!activeProjectId || !activePackGeneratedAt) return;
+                          setIsRegeneratingRec(true);
+                          try {
+                            const res = await fetch("/api/projects/packs/recommendation", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                projectId: activeProjectId,
+                                packGeneratedAt: activePackGeneratedAt,
+                              }),
+                            });
+                            if (!res.ok) return;
+                            const { projects: nextProjects } = (await res.json()) as { projects: Project[] };
+                            setProjects(nextProjects);
+                            const updatedProject = nextProjects.find((p) => p.projectId === activeProjectId);
+                            const updatedPack = updatedProject?.packs.find(
+                              (p) => p.generatedAt === activePackGeneratedAt
+                            );
+                            setRecommendation(updatedPack?.data.recommendation ?? null);
+                          } catch (err) {
+                            console.error("Failed to regenerate recommendation:", err);
+                          } finally {
+                            setIsRegeneratingRec(false);
+                          }
+                        }}
+                        className="mt-4 rounded-xl bg-[#6366F1] px-4 py-2 text-sm font-semibold text-white shadow-md shadow-indigo-500/25 hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isRegeneratingRec ? "Regenerating..." : "Regenerate AI Recommendation"}
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <>
                     <p className="mb-3 text-sm text-gray-300">
